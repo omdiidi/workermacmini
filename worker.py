@@ -124,7 +124,7 @@ def _run_estimation_job(job):
 
     tmpdir = tempfile.mkdtemp(prefix="plan2bid_")
     try:
-        db.patch("projects", {"stage": "ingestion", "progress": 5, "message": "Downloading documents..."}, id=project_id)
+        db.patch("projects", {"status": "running", "stage": "ingestion", "progress": 5, "message": "Downloading documents..."}, id=project_id)
 
         zip_bytes = db.download_storage("project-files", storage_path)
         zip_path = os.path.join(tmpdir, "files.zip")
@@ -139,7 +139,7 @@ def _run_estimation_job(job):
         if os.path.isdir(macosx):
             shutil.rmtree(macosx)
 
-        db.patch("projects", {"stage": "extraction", "progress": 10, "message": "Analyzing documents..."}, id=project_id)
+        db.patch("projects", {"status": "running", "stage": "extraction", "progress": 10, "message": "Analyzing documents..."}, id=project_id)
 
         prompt = (
             f"Run /plan2bid:run to estimate this project. Project ID is {project_id}. "
