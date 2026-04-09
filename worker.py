@@ -99,7 +99,10 @@ def _run_estimation_job(job):
 
         cmd = [
             "claude", "-p",
-            f"Run /plan2bid:run then /plan2bid:save-to-db {project_id}",
+            f"Use the Skill tool to execute /plan2bid:run on the construction documents in this directory. "
+            f"The project ID is {project_id}. After the estimation is complete and estimate_output.json is saved, "
+            f"use the Skill tool to execute /plan2bid:save-to-db with argument {project_id}. "
+            f"You MUST use the Skill tool — do not just describe what you would do.",
             "--dangerously-skip-permissions",
         ]
         result = subprocess.run(
