@@ -73,6 +73,28 @@ def run_job(job):
             _current_job_id = None
 
 
+def _ensure_directory_trusted(directory):
+    """Pre-trust a directory in Claude Code's config so the trust dialog is skipped."""
+    claude_json = os.path.expanduser("~/.claude.json")
+    try:
+        if os.path.exists(claude_json):
+            with open(claude_json) as f:
+                config = json.load(f)
+        else:
+            config = {}
+
+        projects = config.setdefault("projects", {})
+        projects.setdefault(directory, {})["hasTrustDialogAccepted"] = True
+        # Also trust /tmp and /private/tmp (macOS symlink)
+        projects.setdefault("/tmp", {})["hasTrustDialogAccepted"] = True
+        projects.setdefault("/private/tmp", {})["hasTrustDialogAccepted"] = True
+
+        with open(claude_json, "w") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"[trust] Warning: could not pre-trust directory: {e}")
+
+
 def _launch_claude_terminal(prompt, cwd, timeout=1800):
     """Launch Claude Code in a visible Terminal window, wait for completion.
 
@@ -84,6 +106,9 @@ def _launch_claude_terminal(prompt, cwd, timeout=1800):
     runner = os.path.join(cwd, "_run.sh")
 
     # Write a runner script: runs claude, touches _done when finished
+    # Pre-trust the working directory so Claude doesn't show the trust prompt
+    _ensure_directory_trusted(cwd)
+
     with open(runner, "w") as f:
         f.write(f'''#!/bin/bash
 cd "{cwd}"
