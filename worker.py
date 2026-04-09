@@ -73,6 +73,50 @@ def run_job(job):
             _current_job_id = None
 
 
+def _launch_claude_terminal(prompt, cwd, timeout=1800):
+    """Launch Claude Code in a visible Terminal window, wait for completion.
+
+    Opens Terminal.app with claude --dangerously-skip-permissions.
+    Polls for a _done flag file to detect when Claude finishes.
+    Kills the Terminal tab when done.
+    """
+    done_flag = os.path.join(cwd, "_done")
+    runner = os.path.join(cwd, "_run.sh")
+
+    # Write a runner script: runs claude, touches _done when finished
+    with open(runner, "w") as f:
+        f.write(f'''#!/bin/bash
+cd "{cwd}"
+claude --dangerously-skip-permissions "{prompt}"
+touch "{done_flag}"
+''')
+    os.chmod(runner, 0o755)
+
+    # Open Terminal.app and run the script
+    subprocess.Popen([
+        "osascript", "-e",
+        f'tell application "Terminal" to do script "{runner}"'
+    ])
+
+    print(f"[claude] Terminal launched, waiting for completion...")
+
+    # Poll for the _done flag
+    start = time.time()
+    while time.time() - start < timeout:
+        if os.path.exists(done_flag):
+            print(f"[claude] Finished in {int(time.time() - start)}s")
+            # Close the Terminal tab
+            subprocess.run([
+                "osascript", "-e",
+                'tell application "Terminal" to close front window'
+            ], capture_output=True)
+            return True
+        time.sleep(5)
+
+    print(f"[claude] Timed out after {timeout}s")
+    return False
+
+
 def _run_estimation_job(job):
     job_id = job["id"]
     project_id = job["project_id"]
@@ -97,41 +141,27 @@ def _run_estimation_job(job):
 
         db.patch("projects", {"stage": "extraction", "progress": 10, "message": "Analyzing documents..."}, id=project_id)
 
-        cmd = [
-            "claude", "-p",
-            f"Use the Skill tool to execute /plan2bid:run on the construction documents in this directory. "
-            f"The project ID is {project_id}. After the estimation is complete and estimate_output.json is saved, "
-            f"use the Skill tool to execute /plan2bid:save-to-db with argument {project_id}. "
-            f"You MUST use the Skill tool — do not just describe what you would do.",
-            "--dangerously-skip-permissions",
-        ]
-        result = subprocess.run(
-            cmd, cwd=tmpdir, capture_output=True, text=True, timeout=JOB_TIMEOUT,
+        prompt = (
+            f"Run /plan2bid:run to estimate this project. Project ID is {project_id}. "
+            f"Documents are in the current directory. "
+            f"When the estimate is complete, run /plan2bid:save-to-db {project_id}"
         )
 
-        if result.returncode != 0:
-            error_msg = result.stderr[:2000] if result.stderr else "Non-zero exit code"
+        success = _launch_claude_terminal(prompt, tmpdir)
+
+        if success:
             db.patch("estimation_jobs", {
-                "status": "error",
-                "error_message": error_msg,
+                "status": "completed",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }, id=job_id)
-            db.patch("projects", {"status": "error"}, id=project_id)
-            return
-
-        db.patch("estimation_jobs", {
-            "status": "completed",
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }, id=job_id)
-        db.patch("projects", {"status": "completed"}, id=project_id)
-
-    except subprocess.TimeoutExpired:
-        db.patch("estimation_jobs", {
-            "status": "error",
-            "error_message": f"Job timed out after {JOB_TIMEOUT}s",
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }, id=job_id)
-        db.patch("projects", {"status": "error"}, id=project_id)
+            # Note: save-to-db skill updates project status to completed
+        else:
+            db.patch("estimation_jobs", {
+                "status": "error",
+                "error_message": "Timed out waiting for Claude Code to finish",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }, id=job_id)
+            db.patch("projects", {"status": "error", "error_message": "Estimation timed out"}, id=project_id)
 
     except Exception as e:
         db.patch("estimation_jobs", {
@@ -139,7 +169,7 @@ def _run_estimation_job(job):
             "error_message": str(e)[:2000],
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }, id=job_id)
-        db.patch("projects", {"status": "error"}, id=project_id)
+        db.patch("projects", {"status": "error", "error_message": str(e)[:200]}, id=project_id)
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -160,33 +190,27 @@ def _run_scenario_job(job):
             json.dump(base_data, f)
 
         scenario_context = job.get("scenario_context", "")
-        cmd = [
-            "claude", "-p",
+        prompt = (
             f"Run /plan2bid:scenarios to re-price project {project_id}. "
-            f"Scenario context: {scenario_context}\n"
-            f"Base estimate is at ./base_estimate.json\n"
-            f"When done, run /plan2bid:save-scenario-to-db {scenario_id} {project_id}",
-            "--dangerously-skip-permissions",
-        ]
-        result = subprocess.run(
-            cmd, cwd=tmpdir, capture_output=True, text=True, timeout=JOB_TIMEOUT,
+            f"Scenario context: {scenario_context}. "
+            f"Base estimate is at ./base_estimate.json. "
+            f"When done, run /plan2bid:save-scenario-to-db {scenario_id} {project_id}"
         )
 
-        if result.returncode != 0:
-            error_msg = result.stderr[:2000] if result.stderr else "Non-zero exit code"
+        success = _launch_claude_terminal(prompt, tmpdir)
+
+        if success:
             db.patch("estimation_jobs", {
-                "status": "error",
-                "error_message": error_msg,
+                "status": "completed",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }, id=job_id)
-            db.patch("scenarios", {"status": "error"}, id=scenario_id)
-            return
-
-        db.patch("estimation_jobs", {
-            "status": "completed",
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }, id=job_id)
-        db.patch("scenarios", {"status": "completed"}, id=scenario_id)
+        else:
+            db.patch("estimation_jobs", {
+                "status": "error",
+                "error_message": "Timed out waiting for Claude Code to finish",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }, id=job_id)
+            db.patch("scenarios", {"status": "error", "error_message": "Scenario timed out"}, id=scenario_id)
 
     except subprocess.TimeoutExpired:
         db.patch("estimation_jobs", {
