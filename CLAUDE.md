@@ -1,14 +1,17 @@
 # Plan2Bid Worker Setup
 
-This is the estimation worker daemon for Plan2Bid.
+This is the estimation worker daemon for Plan2Bid. It runs on Mac Minis and opens a **visible Terminal window** with Claude Code for each estimation job.
 
 **Required repos:**
 - This worker repo: https://github.com/omdiidi/workermacmini (you're in it)
 - Skills/commands: https://github.com/nkpardon8-prog/claude-dotfiles (cloned to `~/.claude-dotfiles`)
 
 **Prerequisites (must be done BEFORE setup):**
+- macOS machine (Mac Mini) — the worker uses `osascript` to open Terminal.app
+- A display connected (or VNC/Screen Sharing) — Terminal windows must be able to open
 - Claude Code installed: `npm install -g @anthropic-ai/claude-code`
 - Logged into Claude Max: run `claude` once interactively and authenticate
+- `claude` accessible at `/usr/local/bin/claude` — if not, create symlink: `sudo ln -s $(which claude) /usr/local/bin/claude`
 - Supabase `estimation_jobs` and `workers` tables created (see README.md for SQL)
 - Supabase `project-files` Storage bucket created
 
@@ -45,7 +48,18 @@ fi
 
 Ask the user to fill in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env`. These come from the Supabase dashboard (Settings > API).
 
-## 4. Set the hostname (for unique worker ID)
+## 4. Verify claude is in PATH
+
+```bash
+claude --version
+```
+
+If this fails, create a symlink:
+```bash
+sudo ln -s $(which claude) /usr/local/bin/claude
+```
+
+## 5. Set the hostname (for unique worker ID)
 
 Ask the user what to name this worker (e.g., "worker-1", "worker-office", "worker-mini-m4"). Then:
 
@@ -54,16 +68,18 @@ sudo scutil --set HostName plan2bid-{name}
 sudo scutil --set LocalHostName plan2bid-{name}
 ```
 
-## 5. Test the worker
+## 6. Test the worker
 
 ```bash
 source .venv/bin/activate
 python worker.py
 ```
 
-It should print "Worker worker-plan2bid-{name} starting..." and begin polling. Press Ctrl+C to stop once verified.
+It should print "Worker worker-plan2bid-{name} starting..." and begin polling. When a job comes in, a Terminal window will open with Claude Code running. Press Ctrl+C to stop the worker once verified.
 
-## 6. Install as a background service (macOS launchd)
+## 7. Install as a background service (macOS launchd)
+
+**Important:** The worker opens Terminal windows, so it must run as the logged-in user (not as a system daemon). The launchd agent runs in the user's session.
 
 Create the launchd plist:
 
@@ -113,11 +129,11 @@ Then load the service:
 launchctl load ~/Library/LaunchAgents/com.plan2bid.worker.plist
 ```
 
-## 7. Verify
+## 8. Verify
 
 ```bash
 launchctl list | grep plan2bid
 tail -f logs/worker.log
 ```
 
-The worker is now running as a background service. It will survive reboots, auto-restart on crashes, and immediately start picking up jobs.
+The worker is now running as a background service. It will survive reboots, auto-restart on crashes, and immediately start picking up jobs. When a job comes in, you'll see a Terminal window open on the Mac Mini's screen with Claude Code running the estimation.
