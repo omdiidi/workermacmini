@@ -3,7 +3,7 @@
 This is the estimation worker daemon for Plan2Bid.
 
 **Required repos:**
-- This worker repo (you're in it)
+- This worker repo: https://github.com/omdiidi/workermacmini (you're in it)
 - Skills/commands: https://github.com/nkpardon8-prog/claude-dotfiles (cloned to `~/.claude-dotfiles`)
 
 **Prerequisites (must be done BEFORE setup):**
