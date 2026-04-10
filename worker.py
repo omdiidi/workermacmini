@@ -109,10 +109,15 @@ def _launch_claude_terminal(prompt, cwd, timeout=1800):
     # Pre-trust the working directory so Claude doesn't show the trust prompt
     _ensure_directory_trusted(cwd)
 
+    # Write prompt to file to avoid shell injection
+    prompt_path = os.path.join(cwd, "_prompt.txt")
+    with open(prompt_path, "w") as pf:
+        pf.write(prompt)
+
     with open(runner, "w") as f:
         f.write(f'''#!/bin/bash
 cd "{cwd}"
-claude --dangerously-skip-permissions "{prompt}"
+claude --dangerously-skip-permissions "$(cat _prompt.txt)"
 touch "{done_flag}"
 ''')
     os.chmod(runner, 0o755)
@@ -166,11 +171,44 @@ def _run_estimation_job(job):
 
         db.patch("projects", {"status": "running", "stage": "extraction", "progress": 10, "message": "Analyzing documents..."}, id=project_id)
 
-        prompt = (
-            f"Run /plan2bid:run to estimate this project. Project ID is {project_id}. "
-            f"Documents are in the current directory. "
-            f"When the estimate is complete, run /plan2bid:save-to-db {project_id}"
-        )
+        # Fetch project metadata for enriched prompt
+        project = db.get("projects", id=f"eq.{project_id}", select="*")
+        if project:
+            project = project[0]
+            selected_trades = project.get("selected_trades", "[]")
+            description = project.get("project_description", "")
+            facility_type = project.get("facility_type", "")
+            project_type = project.get("project_type", "")
+            city = project.get("city", "")
+            state = project.get("state", "")
+            zip_code = project.get("zip_code", "")
+            project_name = project.get("project_name", "")
+        else:
+            selected_trades = "[]"
+            description = ""
+            facility_type = ""
+            project_type = ""
+            city = state = zip_code = project_name = ""
+
+        prompt_lines = [
+            f"Run /plan2bid:run to estimate this project.",
+            f"Project ID: {project_id}",
+            f"Project Name: {project_name}",
+            f"Facility Type: {facility_type}",
+            f"Project Type: {project_type}",
+            f"Location: {city}, {state} {zip_code}",
+            f"Trades to estimate: {selected_trades}",
+            "",
+            "Project Description:",
+            description,
+            "",
+            "Documents are in the current directory.",
+            "",
+            "Do not ask clarifying questions. Proceed with your best judgment on all ambiguities. State your assumptions in the output.",
+            "",
+            f"When the estimate is complete, run /plan2bid:save-to-db {project_id}",
+        ]
+        prompt = "\n".join(prompt_lines)
 
         success = _launch_claude_terminal(prompt, tmpdir)
 
