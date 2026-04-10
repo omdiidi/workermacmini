@@ -68,6 +68,9 @@ def write_estimation_to_db(project_id, output):
             "trade": trade,
             "total_labor_cost": lab_total,
             "total_labor_hours": sum(float(li.get("total_labor_hours", 0) or 0) for li in lab_items),
+            "total_hours_low": sum(float(li.get("hours_low", 0) or 0) for li in lab_items),
+            "total_hours_expected": sum(float(li.get("hours_expected", 0) or 0) for li in lab_items),
+            "total_hours_high": sum(float(li.get("hours_high", 0) or 0) for li in lab_items),
             "total_cost_low": sum(float(li.get("cost_low", 0) or 0) for li in lab_items),
             "total_cost_expected": lab_total,
             "total_cost_high": sum(float(li.get("cost_high", 0) or 0) for li in lab_items),
@@ -115,9 +118,6 @@ def write_estimation_to_db(project_id, output):
     total_estimate = mat_total + lab_total
 
     update_data = {"total_estimate": total_estimate, "status": "completed"}
-    warnings = output.get("warnings")
-    if warnings:
-        update_data["warnings"] = warnings
     db.patch("projects", update_data, id=project_id)
 
     return {
@@ -173,6 +173,7 @@ def _to_material_row(project_id, li):
         "source_refs": li.get("source_refs", []),
         "model_number": li.get("model_number"),
         "manufacturer": li.get("manufacturer"),
+        "material_description": li.get("material_description", ""),
     }
 
 

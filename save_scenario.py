@@ -16,43 +16,53 @@ def write_scenario_to_db(scenario_id, project_id, output):
     for trade, items in items_by_trade.items():
         # 1. scenario_material_items
         db.delete("scenario_material_items", scenario_id=scenario_id, trade=trade)
-        mat_rows = [_to_scenario_material_row(scenario_id, project_id, li) for li in items]
+        mat_rows = [_to_scenario_material_row(scenario_id, project_id, li) for li in items if li.get("is_material")]
         if mat_rows:
             db.post("scenario_material_items", mat_rows)
 
         # 2. scenario_material_metadata
-        mat_total = sum(float(li.get("extended_cost_expected", 0) or 0) for li in items)
+        mat_items = [li for li in items if li.get("is_material")]
+        mat_total = sum(float(li.get("extended_cost_expected", 0) or 0) for li in mat_items)
         db.upsert("scenario_material_metadata", {
             "scenario_id": scenario_id,
             "trade": trade,
             "total_cost_expected": mat_total,
-            "total_cost_low": sum(float(li.get("extended_cost_low", 0) or 0) for li in items),
-            "total_cost_high": sum(float(li.get("extended_cost_high", 0) or 0) for li in items),
-            "items_high_confidence": sum(1 for i in items if (i.get("material_confidence") or i.get("confidence")) == "high"),
-            "items_medium_confidence": sum(1 for i in items if (i.get("material_confidence") or i.get("confidence")) == "medium"),
-            "items_low_confidence": sum(1 for i in items if (i.get("material_confidence") or i.get("confidence")) == "low"),
+            "total_cost_low": sum(float(li.get("extended_cost_low", 0) or 0) for li in mat_items),
+            "total_cost_high": sum(float(li.get("extended_cost_high", 0) or 0) for li in mat_items),
+            "items_high_confidence": sum(1 for i in mat_items if (i.get("material_confidence") or i.get("confidence")) == "high"),
+            "items_medium_confidence": sum(1 for i in mat_items if (i.get("material_confidence") or i.get("confidence")) == "medium"),
+            "items_low_confidence": sum(1 for i in mat_items if (i.get("material_confidence") or i.get("confidence")) == "low"),
         }, on_conflict="scenario_id,trade")
 
         # 3. scenario_labor_items
         db.delete("scenario_labor_items", scenario_id=scenario_id, trade=trade)
-        lab_rows = [_to_scenario_labor_row(scenario_id, project_id, li) for li in items]
+        lab_rows = [_to_scenario_labor_row(scenario_id, project_id, li) for li in items if li.get("is_labor")]
         if lab_rows:
             db.post("scenario_labor_items", lab_rows)
 
         # 4. scenario_labor_metadata
+        labor_items = [li for li in items if li.get("is_labor")]
         db.upsert("scenario_labor_metadata", {
             "scenario_id": scenario_id,
             "trade": trade,
-            "total_cost_expected": sum(float(li.get("cost_expected", 0) or 0) for li in items),
-            "total_cost_low": sum(float(li.get("cost_low", 0) or 0) for li in items),
-            "total_cost_high": sum(float(li.get("cost_high", 0) or 0) for li in items),
-            "total_hours_expected": sum(float(li.get("hours_expected", 0) or 0) for li in items),
+            "total_cost_expected": sum(float(li.get("cost_expected", 0) or 0) for li in labor_items),
+            "total_cost_low": sum(float(li.get("cost_low", 0) or 0) for li in labor_items),
+            "total_cost_high": sum(float(li.get("cost_high", 0) or 0) for li in labor_items),
+            "total_hours_low": sum(float(li.get("hours_low", 0) or 0) for li in labor_items),
+            "total_hours_expected": sum(float(li.get("hours_expected", 0) or 0) for li in labor_items),
+            "total_hours_high": sum(float(li.get("hours_high", 0) or 0) for li in labor_items),
+            "items_high_confidence": sum(1 for li in labor_items if (li.get("labor_confidence") or li.get("confidence", "")).lower() == "high"),
+            "items_medium_confidence": sum(1 for li in labor_items if (li.get("labor_confidence") or li.get("confidence", "")).lower() == "medium"),
+            "items_low_confidence": sum(1 for li in labor_items if (li.get("labor_confidence") or li.get("confidence", "")).lower() == "low"),
         }, on_conflict="scenario_id,trade")
 
         # 5. scenario_anomaly_flags
         db.delete("scenario_anomaly_flags", scenario_id=scenario_id, trade=trade)
         trade_anomalies = [a for a in output.get("anomalies", []) if a.get("trade") == trade]
         if trade_anomalies:
+            for a in trade_anomalies:
+                if "affected_items" in a and isinstance(a["affected_items"], list):
+                    a["affected_items"] = [str(item) if not isinstance(item, str) else item for item in a["affected_items"]]
             anomaly_rows = [
                 {**a, "scenario_id": scenario_id, "project_id": project_id}
                 for a in trade_anomalies
