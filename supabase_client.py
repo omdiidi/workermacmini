@@ -20,7 +20,8 @@ _client = httpx.Client(headers=HEADERS, timeout=30)
 
 
 def get(table, **params):
-    resp = _client.get(f"{SUPABASE_URL}/rest/v1/{table}", params=params)
+    processed = {k: f"eq.{v}" for k, v in params.items()}
+    resp = _client.get(f"{SUPABASE_URL}/rest/v1/{table}", params=processed)
     resp.raise_for_status()
     return resp.json()
 
