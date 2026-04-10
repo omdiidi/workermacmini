@@ -19,8 +19,16 @@ HEADERS = {
 _client = httpx.Client(headers=HEADERS, timeout=30)
 
 
+_CONTROL_PARAMS = {"select", "order", "limit", "offset", "on_conflict"}
+
 def get(table, **params):
-    processed = {k: f"eq.{v}" for k, v in params.items()}
+    """GET with auto eq. prefix on filter params. Control params (select, order, limit) pass through."""
+    processed = {}
+    for k, v in params.items():
+        if k in _CONTROL_PARAMS:
+            processed[k] = v  # Pass through as-is
+        else:
+            processed[k] = f"eq.{v}"  # Auto-prefix filter values
     resp = _client.get(f"{SUPABASE_URL}/rest/v1/{table}", params=processed)
     resp.raise_for_status()
     return resp.json()

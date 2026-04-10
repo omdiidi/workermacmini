@@ -106,7 +106,7 @@ def _ensure_directory_trusted(directory):
         print(f"[trust] Warning: could not pre-trust directory: {e}")
 
 
-def _launch_claude_terminal(prompt, cwd, timeout=1800):
+def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
     """Launch Claude Code in a visible Terminal window, wait for completion.
 
     Opens Terminal.app with claude --dangerously-skip-permissions.
@@ -127,6 +127,7 @@ def _launch_claude_terminal(prompt, cwd, timeout=1800):
 
     with open(runner, "w") as f:
         f.write(f'''#!/bin/bash
+set -e
 cd "{cwd}"
 claude --dangerously-skip-permissions "$(cat _prompt.txt)"
 touch "{done_flag}"
@@ -321,10 +322,23 @@ def _run_scenario_job(job):
         success = _launch_claude_terminal(prompt, tmpdir)
 
         if success:
-            db.patch("estimation_jobs", {
-                "status": "completed",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-            }, id=job_id)
+            # Verify scenario save actually completed
+            scenario_check = db.get("scenarios", id=scenario_id, select="status")
+            if scenario_check and scenario_check[0].get("status") == "completed":
+                db.patch("estimation_jobs", {
+                    "status": "completed",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }, id=job_id)
+            else:
+                db.patch("estimation_jobs", {
+                    "status": "error",
+                    "error_message": "Claude Code finished but save-scenario-to-db did not complete",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }, id=job_id)
+                db.patch("scenarios", {
+                    "status": "error",
+                    "error_message": "Scenario completed but results were not saved",
+                }, id=scenario_id)
         else:
             db.patch("estimation_jobs", {
                 "status": "error",
