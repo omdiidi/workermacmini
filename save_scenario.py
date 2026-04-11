@@ -45,7 +45,7 @@ def write_scenario_to_db(scenario_id, project_id, output):
         db.upsert("scenario_labor_metadata", {
             "scenario_id": scenario_id,
             "trade": trade,
-            "total_cost_expected": sum(float(li.get("cost_expected", 0) or 0) for li in labor_items),
+            "total_cost_expected": sum(float(li.get("cost_expected") if li.get("cost_expected") is not None else li.get("labor_cost", 0) or 0) for li in labor_items),
             "total_cost_low": sum(float(li.get("cost_low", 0) or 0) for li in labor_items),
             "total_cost_high": sum(float(li.get("cost_high", 0) or 0) for li in labor_items),
             "total_hours_low": sum(float(li.get("hours_low", 0) or 0) for li in labor_items),

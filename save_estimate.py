@@ -10,8 +10,17 @@ def write_estimation_to_db(project_id, output):
     """Decompose agent structured output into DB table inserts."""
     trades_seen = set()
 
+    all_items = output.get("line_items", [])
+    if not all_items:
+        print(f"[save] WARNING: No line items in estimate output. Marking project as error.")
+        db.patch("projects", {
+            "status": "error",
+            "error_message": "Estimation produced no line items — check estimate_output.json format",
+        }, id=project_id)
+        return
+
     items_by_trade = {}
-    for li in output.get("line_items", []):
+    for li in all_items:
         trade = li.get("trade", "Unknown")
         trades_seen.add(trade)
         items_by_trade.setdefault(trade, []).append(li)
@@ -31,6 +40,9 @@ def write_estimation_to_db(project_id, output):
             "material_items": sum(1 for i in items if i.get("is_material")),
             "labor_items": sum(1 for i in items if i.get("is_labor")),
             "extraction_summary": f"{len(items)} items extracted for {trade}",
+            "documents_searched": output.get("documents_searched", 0),
+            "pages_searched": output.get("pages_searched", 0),
+            "warnings": output.get("warnings", []),
         }, on_conflict="project_id,trade")
 
         # 3. material_items
@@ -62,7 +74,7 @@ def write_estimation_to_db(project_id, output):
 
         # 6. labor_metadata
         lab_items = [li for li in items if li.get("is_labor")]
-        lab_total = sum(float(li.get("labor_cost", 0) or 0) for li in lab_items)
+        lab_total = sum(float(li.get("cost_expected") if li.get("cost_expected") is not None else li.get("labor_cost", 0) or 0) for li in lab_items)
         db.upsert("labor_metadata", {
             "project_id": project_id,
             "trade": trade,
@@ -114,7 +126,7 @@ def write_estimation_to_db(project_id, output):
     # 11. Update project total + warnings
     all_items = output.get("line_items", [])
     mat_total = sum(float(li.get("extended_cost_expected", 0) or 0) for li in all_items if li.get("is_material"))
-    lab_total = sum(float(li.get("labor_cost", 0) or 0) for li in all_items if li.get("is_labor"))
+    lab_total = sum(float(li.get("cost_expected") if li.get("cost_expected") is not None else li.get("labor_cost", 0) or 0) for li in all_items if li.get("is_labor"))
     total_estimate = mat_total + lab_total
 
     update_data = {"total_estimate": total_estimate, "status": "completed"}
