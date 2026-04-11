@@ -84,8 +84,13 @@ def run_job(job):
             _current_job_id = None
 
 
+_trust_failed = False
+
 def _ensure_directory_trusted(directory):
-    """Pre-trust a directory in Claude Code's config so the trust dialog is skipped."""
+    """Pre-trust a directory in Claude Code's config so the trust dialog is skipped.
+    Sets _trust_failed if writing fails — auto-Enter will be used as fallback.
+    """
+    global _trust_failed
     claude_json = os.path.expanduser("~/.claude.json")
     try:
         if os.path.exists(claude_json):
@@ -105,8 +110,10 @@ def _ensure_directory_trusted(directory):
 
         with open(claude_json, "w") as f:
             json.dump(config, f, indent=2)
+        _trust_failed = False
     except Exception as e:
         print(f"[trust] Warning: could not pre-trust directory: {e}")
+        _trust_failed = True
 
 
 def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
@@ -127,15 +134,19 @@ def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
     with open(prompt_path, "w") as pf:
         pf.write(prompt)
 
+    # Only add auto-Enter if pre-trust failed (otherwise it interferes with Claude)
+    auto_enter_line = ""
+    auto_enter_cleanup = ""
+    if _trust_failed:
+        auto_enter_line = '(sleep 5 && osascript -e \'tell application "System Events" to keystroke return\') &\nAUTO_ENTER_PID=$!'
+        auto_enter_cleanup = "kill $AUTO_ENTER_PID 2>/dev/null"
+
     with open(runner, "w") as f:
         f.write(f'''#!/bin/bash
 cd "{cwd}"
-# Dismiss trust dialog — 5s gives Claude Code time to fully load and show it
-(sleep 5 && osascript -e 'tell application "System Events" to keystroke return') &
-AUTO_ENTER_PID=$!
+{auto_enter_line}
 claude --dangerously-skip-permissions "$(cat _prompt.txt)"
-# Kill the auto-enter process if still running (cleanup)
-kill $AUTO_ENTER_PID 2>/dev/null
+{auto_enter_cleanup}
 # Always touch done flag — worker verifies save success separately
 touch "{done_flag}"
 ''')
