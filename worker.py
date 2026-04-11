@@ -84,30 +84,7 @@ def run_job(job):
             _current_job_id = None
 
 
-def _ensure_directory_trusted(directory):
-    """Pre-trust a directory in Claude Code's config so the trust dialog is skipped."""
-    claude_json = os.path.expanduser("~/.claude.json")
-    try:
-        if os.path.exists(claude_json):
-            with open(claude_json) as f:
-                config = json.load(f)
-        else:
-            config = {}
-
-        projects = config.setdefault("projects", {})
-        projects.setdefault(directory, {})["hasTrustDialogAccepted"] = True
-        # Also trust /tmp, /private/tmp, and /var/folders (macOS temp dirs)
-        projects.setdefault("/tmp", {})["hasTrustDialogAccepted"] = True
-        projects.setdefault("/private/tmp", {})["hasTrustDialogAccepted"] = True
-        # macOS mkdtemp often uses /var/folders — trust the parent
-        if directory.startswith("/var/folders"):
-            parent = "/".join(directory.split("/")[:5])  # e.g. /var/folders/xx/xxxxx
-            projects.setdefault(parent, {})["hasTrustDialogAccepted"] = True
-
-        with open(claude_json, "w") as f:
-            json.dump(config, f, indent=2)
-    except Exception as e:
-        print(f"[trust] Warning: could not pre-trust directory: {e}")
+    # Trust dialog is handled by auto-Enter keystroke in _run.sh
 
 
 def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
@@ -122,7 +99,7 @@ def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
 
     # Write a runner script: runs claude, touches _done when finished
     # Pre-trust the working directory so Claude doesn't show the trust prompt
-    _ensure_directory_trusted(cwd)
+    # Trust dialog handled by auto-Enter in _run.sh
 
     # Write prompt to file to avoid shell injection
     prompt_path = os.path.join(cwd, "_prompt.txt")
