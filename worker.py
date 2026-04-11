@@ -139,7 +139,7 @@ touch "{done_flag}"
             subprocess.run([
                 "osascript", "-e",
                 'tell application "Terminal" to close front window'
-            ], capture_output=True)
+            ], capture_output=True, timeout=10)
             return True
         time.sleep(5)
 
@@ -148,7 +148,7 @@ touch "{done_flag}"
     subprocess.run([
         "osascript", "-e",
         'tell application "Terminal" to close front window'
-    ], capture_output=True)
+    ], capture_output=True, timeout=10)
     return False
 
 
