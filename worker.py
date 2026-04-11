@@ -173,41 +173,49 @@ def _run_estimation_job(job):
     try:
         db.patch("projects", {"status": "running", "stage": "ingestion", "progress": 5, "message": "Downloading documents..."}, id=project_id)
 
-        zip_bytes = db.download_storage("project-files", storage_path)
-        zip_path = os.path.join(tmpdir, "files.zip")
-        with open(zip_path, "wb") as f:
-            f.write(zip_bytes)
+        file_bytes = db.download_storage("project-files", storage_path)
+        # Determine file type from storage path extension
+        ext = os.path.splitext(storage_path)[1].lower()
+        download_path = os.path.join(tmpdir, f"upload{ext or '.bin'}")
+        with open(download_path, "wb") as f:
+            f.write(file_bytes)
+
         MAX_UNCOMPRESSED_SIZE = 500 * 1024 * 1024
         MAX_FILES = 500
 
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            total_size = sum(info.file_size for info in zf.infolist())
-            file_count = len(zf.infolist())
+        if ext == '.zip':
+            # ZIP file — extract contents
+            with zipfile.ZipFile(download_path, "r") as zf:
+                total_size = sum(info.file_size for info in zf.infolist())
+                file_count = len(zf.infolist())
 
-            if total_size > MAX_UNCOMPRESSED_SIZE:
-                raise ValueError(f"ZIP uncompressed size {total_size} exceeds limit of {MAX_UNCOMPRESSED_SIZE}")
-            if file_count > MAX_FILES:
-                raise ValueError(f"ZIP contains {file_count} files, exceeds limit of {MAX_FILES}")
+                if total_size > MAX_UNCOMPRESSED_SIZE:
+                    raise ValueError(f"ZIP uncompressed size {total_size} exceeds limit")
+                if file_count > MAX_FILES:
+                    raise ValueError(f"ZIP contains {file_count} files, exceeds limit")
 
-            for info in zf.infolist():
-                if info.filename.startswith('/') or '..' in info.filename:
-                    raise ValueError(f"ZIP contains suspicious path: {info.filename}")
+                for info in zf.infolist():
+                    if info.filename.startswith('/') or '..' in info.filename:
+                        raise ValueError(f"ZIP contains suspicious path: {info.filename}")
 
-            zf.extractall(tmpdir)
-        os.unlink(zip_path)
+                zf.extractall(tmpdir)
+            os.unlink(download_path)
 
-        # Clean __MACOSX junk
-        macosx = os.path.join(tmpdir, "__MACOSX")
-        if os.path.isdir(macosx):
-            shutil.rmtree(macosx)
+            # Clean __MACOSX junk
+            macosx = os.path.join(tmpdir, "__MACOSX")
+            if os.path.isdir(macosx):
+                shutil.rmtree(macosx)
 
-        # E2: Flatten if all files are inside a single subdirectory
-        entries = [e for e in os.listdir(tmpdir) if not e.startswith('.')]
-        if len(entries) == 1 and os.path.isdir(os.path.join(tmpdir, entries[0])):
-            subdir = os.path.join(tmpdir, entries[0])
-            for item in os.listdir(subdir):
-                shutil.move(os.path.join(subdir, item), os.path.join(tmpdir, item))
-            os.rmdir(subdir)
+            # Flatten if all files are inside a single subdirectory
+            entries = [e for e in os.listdir(tmpdir) if not e.startswith('.')]
+            if len(entries) == 1 and os.path.isdir(os.path.join(tmpdir, entries[0])):
+                subdir = os.path.join(tmpdir, entries[0])
+                for item in os.listdir(subdir):
+                    shutil.move(os.path.join(subdir, item), os.path.join(tmpdir, item))
+                os.rmdir(subdir)
+        else:
+            # Single file (PDF, image, etc.) — already in tmpdir, ready for Claude
+            print(f"[worker] Single file upload: {ext}")
 
         db.patch("projects", {"status": "running", "stage": "extraction", "progress": 10, "message": "Analyzing documents..."}, id=project_id)
 
