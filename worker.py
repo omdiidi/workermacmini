@@ -84,7 +84,25 @@ def run_job(job):
             _current_job_id = None
 
 
-    # Trust dialog is handled by auto-Enter keystroke in _run.sh
+def _ensure_directory_trusted(directory):
+    """Pre-trust a directory in Claude Code's config so the trust dialog is skipped."""
+    claude_json = os.path.expanduser("~/.claude.json")
+    try:
+        if os.path.exists(claude_json):
+            with open(claude_json) as f:
+                config = json.load(f)
+        else:
+            config = {}
+
+        projects = config.setdefault("projects", {})
+        projects.setdefault(directory, {})["hasTrustDialogAccepted"] = True
+        projects.setdefault("/tmp", {})["hasTrustDialogAccepted"] = True
+        projects.setdefault("/private/tmp", {})["hasTrustDialogAccepted"] = True
+
+        with open(claude_json, "w") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"[trust] Warning: could not pre-trust directory: {e}")
 
 
 def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
@@ -97,9 +115,8 @@ def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
     done_flag = os.path.join(cwd, "_done")
     runner = os.path.join(cwd, "_run.sh")
 
-    # Write a runner script: runs claude, touches _done when finished
     # Pre-trust the working directory so Claude doesn't show the trust prompt
-    # Trust dialog handled by auto-Enter in _run.sh
+    _ensure_directory_trusted(cwd)
 
     # Write prompt to file to avoid shell injection
     prompt_path = os.path.join(cwd, "_prompt.txt")
@@ -109,8 +126,6 @@ def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
     with open(runner, "w") as f:
         f.write(f'''#!/bin/bash
 cd "{cwd}"
-# Auto-press Enter after 3 seconds to dismiss any trust dialog
-(sleep 3 && osascript -e 'tell application "System Events" to keystroke return') &
 claude --dangerously-skip-permissions "$(cat _prompt.txt)"
 # Always touch done flag — worker verifies save success separately
 touch "{done_flag}"

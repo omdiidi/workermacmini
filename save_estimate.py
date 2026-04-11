@@ -93,13 +93,20 @@ def write_estimation_to_db(project_id, output):
             "items_low_confidence": sum(1 for i in lab_items if (i.get("labor_confidence") or i.get("confidence")) == "low"),
         }, on_conflict="project_id,trade")
 
-        # 7. anomaly_flags
+        # 7. anomaly_flags — map to exact DB columns
         db.delete("anomaly_flags", project_id=project_id, trade=trade)
         trade_anomalies = [a for a in output.get("anomalies", []) if a.get("trade") == trade]
         if trade_anomalies:
-            for a in trade_anomalies:
-                a["project_id"] = project_id
-            db.post("anomaly_flags", trade_anomalies)
+            mapped_anomalies = [{
+                "project_id": project_id,
+                "trade": a.get("trade", trade),
+                "anomaly_type": a.get("anomaly_type", "noted"),
+                "category": a.get("category", ""),
+                "description": a.get("description", ""),
+                "affected_items": [str(i) for i in a.get("affected_items", [])],
+                "cost_impact": float(a.get("cost_impact", 0) or 0),
+            } for a in trade_anomalies]
+            db.post("anomaly_flags", mapped_anomalies)
 
     # 8. site_intelligence — wrap in expected JSONB columns
     site_intel = output.get("site_intelligence")

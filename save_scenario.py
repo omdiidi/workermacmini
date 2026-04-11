@@ -56,18 +56,21 @@ def write_scenario_to_db(scenario_id, project_id, output):
             "items_low_confidence": sum(1 for li in labor_items if (li.get("labor_confidence") or li.get("confidence", "")).lower() == "low"),
         }, on_conflict="scenario_id,trade")
 
-        # 5. scenario_anomaly_flags
+        # 5. scenario_anomaly_flags — map to exact DB columns
         db.delete("scenario_anomaly_flags", scenario_id=scenario_id, trade=trade)
         trade_anomalies = [a for a in output.get("anomalies", []) if a.get("trade") == trade]
         if trade_anomalies:
-            for a in trade_anomalies:
-                if "affected_items" in a and isinstance(a["affected_items"], list):
-                    a["affected_items"] = [str(item) if not isinstance(item, str) else item for item in a["affected_items"]]
-            anomaly_rows = [
-                {**a, "scenario_id": scenario_id, "project_id": project_id}
-                for a in trade_anomalies
-            ]
-            db.post("scenario_anomaly_flags", anomaly_rows)
+            mapped_anomalies = [{
+                "scenario_id": scenario_id,
+                "project_id": project_id,
+                "trade": a.get("trade", trade),
+                "anomaly_type": a.get("anomaly_type", "noted"),
+                "category": a.get("category", ""),
+                "description": a.get("description", ""),
+                "affected_items": [str(i) for i in a.get("affected_items", [])],
+                "cost_impact": float(a.get("cost_impact", 0) or 0),
+            } for a in trade_anomalies]
+            db.post("scenario_anomaly_flags", mapped_anomalies)
 
     # 6. Update scenario status
     db.patch("scenarios", {
