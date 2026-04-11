@@ -101,17 +101,31 @@ def write_estimation_to_db(project_id, output):
                 a["project_id"] = project_id
             db.post("anomaly_flags", trade_anomalies)
 
-    # 8. site_intelligence
+    # 8. site_intelligence — wrap in expected JSONB columns
     site_intel = output.get("site_intelligence")
     if site_intel:
-        site_intel["project_id"] = project_id
-        db.upsert("site_intelligence", site_intel, on_conflict="project_id")
+        db.upsert("site_intelligence", {
+            "project_id": project_id,
+            "item_annotations": site_intel.get("item_annotations", {}),
+            "project_findings": site_intel.get("project_findings", site_intel),
+            "procurement_intel": site_intel.get("procurement_intel", {}),
+            "estimation_guidance": site_intel.get("estimation_guidance", {}),
+        }, on_conflict="project_id")
 
-    # 9. project_briefs
+    # 9. project_briefs — wrap in expected columns
     brief = output.get("brief_data")
     if brief:
-        brief["project_id"] = project_id
-        db.upsert("project_briefs", brief, on_conflict="project_id")
+        db.upsert("project_briefs", {
+            "project_id": project_id,
+            "project_classification": brief.get("project_classification", ""),
+            "facility_description": brief.get("facility_description", ""),
+            "key_findings": brief.get("key_findings", ""),
+            "scope_summary": brief.get("scope_summary", ""),
+            "document_summary": brief.get("document_summary", ""),
+            "extraction_focus": brief.get("extraction_focus", ""),
+            "generation_notes": brief.get("generation_notes", ""),
+            "brief_data": brief,  # also store the full blob
+        }, on_conflict="project_id")
 
     # 10. pipeline_summaries (summary_data is a single JSONB column)
     db.upsert("pipeline_summaries", {

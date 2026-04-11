@@ -108,11 +108,11 @@ def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
 
     with open(runner, "w") as f:
         f.write(f'''#!/bin/bash
-set -e
 cd "{cwd}"
 # Auto-press Enter after 3 seconds to dismiss any trust dialog
 (sleep 3 && osascript -e 'tell application "System Events" to keystroke return') &
 claude --dangerously-skip-permissions "$(cat _prompt.txt)"
+# Always touch done flag — worker verifies save success separately
 touch "{done_flag}"
 ''')
     os.chmod(runner, 0o755)
@@ -144,6 +144,11 @@ touch "{done_flag}"
         time.sleep(5)
 
     print(f"[claude] Timed out after {timeout}s")
+    # Close the Terminal tab on timeout too — don't leave orphaned windows
+    subprocess.run([
+        "osascript", "-e",
+        'tell application "Terminal" to close front window'
+    ], capture_output=True)
     return False
 
 
