@@ -130,8 +130,8 @@ def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
     with open(runner, "w") as f:
         f.write(f'''#!/bin/bash
 cd "{cwd}"
-# Dismiss trust dialog at 1s (before skill loading at ~4-5s)
-(sleep 1 && osascript -e 'tell application "System Events" to keystroke return') &
+# Dismiss trust dialog — 5s gives Claude Code time to fully load and show it
+(sleep 5 && osascript -e 'tell application "System Events" to keystroke return') &
 AUTO_ENTER_PID=$!
 claude --dangerously-skip-permissions "$(cat _prompt.txt)"
 # Kill the auto-enter process if still running (cleanup)
