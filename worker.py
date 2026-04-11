@@ -96,9 +96,13 @@ def _ensure_directory_trusted(directory):
 
         projects = config.setdefault("projects", {})
         projects.setdefault(directory, {})["hasTrustDialogAccepted"] = True
-        # Also trust /tmp and /private/tmp (macOS symlink)
+        # Also trust /tmp, /private/tmp, and /var/folders (macOS temp dirs)
         projects.setdefault("/tmp", {})["hasTrustDialogAccepted"] = True
         projects.setdefault("/private/tmp", {})["hasTrustDialogAccepted"] = True
+        # macOS mkdtemp often uses /var/folders — trust the parent
+        if directory.startswith("/var/folders"):
+            parent = "/".join(directory.split("/")[:5])  # e.g. /var/folders/xx/xxxxx
+            projects.setdefault(parent, {})["hasTrustDialogAccepted"] = True
 
         with open(claude_json, "w") as f:
             json.dump(config, f, indent=2)
@@ -129,6 +133,8 @@ def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
         f.write(f'''#!/bin/bash
 set -e
 cd "{cwd}"
+# Auto-press Enter after 3 seconds to dismiss any trust dialog
+(sleep 3 && osascript -e 'tell application "System Events" to keystroke return') &
 claude --dangerously-skip-permissions "$(cat _prompt.txt)"
 touch "{done_flag}"
 ''')
@@ -169,7 +175,7 @@ def _run_estimation_job(job):
     project_id = job["project_id"]
     storage_path = job.get("zip_storage_path", "")
 
-    tmpdir = tempfile.mkdtemp(prefix="plan2bid_")
+    tmpdir = tempfile.mkdtemp(prefix="plan2bid_", dir="/tmp")
     try:
         db.patch("projects", {"status": "running", "stage": "ingestion", "progress": 5, "message": "Downloading documents..."}, id=project_id)
 
