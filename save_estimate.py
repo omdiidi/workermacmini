@@ -12,12 +12,10 @@ def write_estimation_to_db(project_id, output):
 
     all_items = output.get("line_items", [])
     if not all_items:
-        print(f"[save] WARNING: No line items in estimate output. Marking project as error.")
-        db.patch("projects", {
-            "status": "error",
-            "error_message": "Estimation produced no line items — check estimate_output.json format",
-        }, id=project_id)
-        return
+        print(f"[save] ERROR: No line_items array found in estimate_output.json.", file=sys.stderr)
+        print(f"[save] Expected a top-level 'line_items' array with objects containing 'is_material', 'is_labor', 'trade', 'description', 'quantity', etc.", file=sys.stderr)
+        print(f"[save] Reformat estimate_output.json to match this schema and run save-to-db again.", file=sys.stderr)
+        sys.exit(1)
 
     items_by_trade = {}
     for li in all_items:
@@ -249,7 +247,8 @@ def main():
         output = json.load(f)
 
     result = write_estimation_to_db(args.project_id, output)
-    print(json.dumps(result, indent=2))
+    if result:
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

@@ -54,7 +54,8 @@ while True:
     7. You can WATCH Claude Code work in the Terminal window
     8. Claude reads docs, extracts items, prices materials, estimates labor
     9. /plan2bid:save-to-db calls save_estimate.py → sets project.status = "completed"
-    10. Worker polls DB every 15s — detects status change to completed/error
+    10. Worker polls DB every 15s — detects status change to "completed"
+        (ignores "error" — Claude may be retrying a failed save)
     11. Worker sends double Ctrl+C to exit Claude, Terminal window closes automatically
     12. Worker cleans up temp files + Claude session data, marks job complete
     13. Back to polling
@@ -201,6 +202,7 @@ GROUP BY status;
 
 **Jobs stuck in "running":**
 - The stale job reaper re-queues after 150 minutes automatically
+- If Claude is retrying a failed save, this is expected — check the Terminal window
 - Manual fix: `UPDATE estimation_jobs SET status='pending', worker_id=NULL WHERE id='...'`
 
 **Terminal window doesn't open:**

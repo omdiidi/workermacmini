@@ -182,8 +182,9 @@ def _launch_claude_terminal(prompt, cwd, status_table, status_id, timeout=JOB_TI
     """Launch Claude Code in a visible Terminal window, poll DB for completion.
 
     Opens Terminal.app with claude --dangerously-skip-permissions.
-    Polls the DB for status changes (completed/error) since Claude doesn't auto-exit.
-    When done, sends double Ctrl+C to exit Claude, then closes the window.
+    Polls the DB for project/scenario status. Only acts on "completed" — if status
+    shows "error", keeps the session alive (Claude may be retrying a failed save).
+    Timeout is the backstop for truly stuck sessions.
 
     Returns: RESULT_COMPLETED, RESULT_ERROR, or RESULT_TIMEOUT
     """
@@ -233,11 +234,16 @@ claude --dangerously-skip-permissions "$(cat _prompt.txt)"
                 _exit_claude_and_close_terminal(window_id)
                 return RESULT_ERROR
             status = rows[0].get("status")
-            if status in ("completed", "error"):
+            if status == "completed":
                 elapsed = int(time.time() - start)
-                print(f"[claude] DB status={status} after {elapsed}s")
+                print(f"[claude] DB status=completed after {elapsed}s")
                 _exit_claude_and_close_terminal(window_id)
-                return RESULT_COMPLETED if status == "completed" else RESULT_ERROR
+                return RESULT_COMPLETED
+            if status == "error":
+                # Don't close — Claude may be retrying a failed save.
+                # Keep the session alive; timeout is the backstop.
+                elapsed = int(time.time() - start)
+                print(f"[claude] DB shows error at {elapsed}s — keeping session alive (Claude may retry)")
         except Exception as e:
             print(f"[claude] DB poll error (will retry): {e}", file=sys.stderr)
         time.sleep(DB_POLL_INTERVAL)

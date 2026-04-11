@@ -13,6 +13,11 @@ def write_scenario_to_db(scenario_id, project_id, output):
         trade = li.get("trade", "Unknown")
         items_by_trade.setdefault(trade, []).append(li)
 
+    if not items_by_trade:
+        print(f"[save] ERROR: No line_items found in scenario_output.json.", file=sys.stderr)
+        print(f"[save] Expected a top-level 'line_items' array. Reformat and retry.", file=sys.stderr)
+        sys.exit(1)
+
     for trade, items in items_by_trade.items():
         # 1. scenario_material_items
         db.delete("scenario_material_items", scenario_id=scenario_id, trade=trade)
@@ -150,7 +155,8 @@ def main():
         output = json.load(f)
 
     result = write_scenario_to_db(args.scenario_id, args.project_id, output)
-    print(json.dumps(result, indent=2))
+    if result:
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
