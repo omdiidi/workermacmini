@@ -291,7 +291,7 @@ def _run_scenario_job(job):
     project_id = job["project_id"]
     scenario_id = job.get("scenario_id")
 
-    tmpdir = tempfile.mkdtemp(prefix="plan2bid_scenario_")
+    tmpdir = tempfile.mkdtemp(prefix="plan2bid_scenario_", dir="/tmp")
     try:
         db.patch("scenarios", {"status": "running"}, id=scenario_id)
 
