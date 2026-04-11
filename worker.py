@@ -95,7 +95,11 @@ def _ensure_directory_trusted(directory):
             config = {}
 
         projects = config.setdefault("projects", {})
+        # Trust the directory and its real path (macOS /tmp -> /private/tmp)
         projects.setdefault(directory, {})["hasTrustDialogAccepted"] = True
+        real_dir = os.path.realpath(directory)
+        if real_dir != directory:
+            projects.setdefault(real_dir, {})["hasTrustDialogAccepted"] = True
         projects.setdefault("/tmp", {})["hasTrustDialogAccepted"] = True
         projects.setdefault("/private/tmp", {})["hasTrustDialogAccepted"] = True
 
