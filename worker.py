@@ -19,6 +19,11 @@ JOB_TIMEOUT = 7200
 POLL_INTERVAL = 5
 HEARTBEAT_INTERVAL = 30
 STALE_THRESHOLD_MINUTES = 150
+DB_POLL_INTERVAL = 15
+
+RESULT_COMPLETED = "completed"
+RESULT_ERROR = "error"
+RESULT_TIMEOUT = "timeout"
 
 _current_job_id = None
 _shutdown_requested = False
@@ -84,13 +89,8 @@ def run_job(job):
             _current_job_id = None
 
 
-_trust_failed = False
-
 def _ensure_directory_trusted(directory):
-    """Pre-trust a directory in Claude Code's config so the trust dialog is skipped.
-    Sets _trust_failed if writing fails — auto-Enter will be used as fallback.
-    """
-    global _trust_failed
+    """Pre-trust a directory in Claude Code's config so the trust dialog is skipped."""
     claude_json = os.path.expanduser("~/.claude.json")
     try:
         if os.path.exists(claude_json):
@@ -110,20 +110,83 @@ def _ensure_directory_trusted(directory):
 
         with open(claude_json, "w") as f:
             json.dump(config, f, indent=2)
-        _trust_failed = False
     except Exception as e:
         print(f"[trust] Warning: could not pre-trust directory: {e}")
-        _trust_failed = True
 
 
-def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
-    """Launch Claude Code in a visible Terminal window, wait for completion.
+def _exit_claude_and_close_terminal(window_id):
+    """Send double Ctrl+C to exit Claude in the specified window, then close it.
+
+    Uses 'do script (ASCII character 3)' which sends Ctrl+C directly to the
+    specific tab without needing Accessibility permissions or window focus.
+    """
+    try:
+        subprocess.run(["osascript", "-e", f'''
+            tell application "Terminal"
+                do script (ASCII character 3) in tab 1 of window id {window_id}
+                delay 0.3
+                do script (ASCII character 3) in tab 1 of window id {window_id}
+            end tell
+        '''], capture_output=True, timeout=10)
+    except Exception as e:
+        print(f"[claude] Ctrl+C send failed (window may be gone): {e}")
+
+    # Wait for exit chain: Claude exits -> _run.sh finishes -> bash exits -> exit 0
+    time.sleep(3)
+
+    # Close the specific window by ID. "saving no" suppresses any dialog as safety net.
+    try:
+        subprocess.run(["osascript", "-e",
+            f'tell application "Terminal" to close window id {window_id} saving no'
+        ], capture_output=True, timeout=10)
+    except Exception as e:
+        print(f"[claude] Window close failed (may already be closed): {e}")
+
+
+def _cleanup_session_data(cwd):
+    """Remove Claude Code session data for the tmpdir to prevent disk bloat.
+
+    Cleans two locations:
+    1. ~/.claude/projects/<encoded-path>/ — session transcripts (4-44MB each)
+    2. ~/.claude/session-env/<session-id>/ — session environment data
+    """
+    real_cwd = os.path.realpath(cwd)
+    encoded = real_cwd.replace("/", "-")
+
+    claude_dir = os.path.expanduser("~/.claude")
+
+    # 1. Clean ~/.claude/projects/<encoded-path>/
+    projects_dir = os.path.join(claude_dir, "projects")
+    if os.path.isdir(projects_dir):
+        for entry in os.listdir(projects_dir):
+            if entry == encoded:
+                target = os.path.join(projects_dir, entry)
+                shutil.rmtree(target, ignore_errors=True)
+                print(f"[cleanup] Removed project session: {entry}")
+
+    # 2. Clean ~/.claude/session-env/ — time-based cleanup
+    session_env_dir = os.path.join(claude_dir, "session-env")
+    if os.path.isdir(session_env_dir):
+        one_hour_ago = time.time() - 3600
+        for entry in os.listdir(session_env_dir):
+            entry_path = os.path.join(session_env_dir, entry)
+            try:
+                if os.path.isdir(entry_path) and os.path.getmtime(entry_path) > one_hour_ago:
+                    shutil.rmtree(entry_path, ignore_errors=True)
+                    print(f"[cleanup] Removed session-env: {entry}")
+            except OSError:
+                pass
+
+
+def _launch_claude_terminal(prompt, cwd, status_table, status_id, timeout=JOB_TIMEOUT):
+    """Launch Claude Code in a visible Terminal window, poll DB for completion.
 
     Opens Terminal.app with claude --dangerously-skip-permissions.
-    Polls for a _done flag file to detect when Claude finishes.
-    Kills the Terminal tab when done.
+    Polls the DB for status changes (completed/error) since Claude doesn't auto-exit.
+    When done, sends double Ctrl+C to exit Claude, then closes the window.
+
+    Returns: RESULT_COMPLETED, RESULT_ERROR, or RESULT_TIMEOUT
     """
-    done_flag = os.path.join(cwd, "_done")
     runner = os.path.join(cwd, "_run.sh")
 
     # Pre-trust the working directory so Claude doesn't show the trust prompt
@@ -134,57 +197,55 @@ def _launch_claude_terminal(prompt, cwd, timeout=JOB_TIMEOUT):
     with open(prompt_path, "w") as pf:
         pf.write(prompt)
 
-    # Only add auto-Enter if pre-trust failed (otherwise it interferes with Claude)
-    auto_enter_line = ""
-    auto_enter_cleanup = ""
-    if _trust_failed:
-        auto_enter_line = '(sleep 5 && osascript -e \'tell application "System Events" to keystroke return\') &\nAUTO_ENTER_PID=$!'
-        auto_enter_cleanup = "kill $AUTO_ENTER_PID 2>/dev/null"
-
     with open(runner, "w") as f:
         f.write(f'''#!/bin/bash
 cd "{cwd}"
-{auto_enter_line}
 claude --dangerously-skip-permissions "$(cat _prompt.txt)"
-{auto_enter_cleanup}
-# Always touch done flag — worker verifies save success separately
-touch "{done_flag}"
 ''')
     os.chmod(runner, 0o755)
 
-    # Open Terminal.app and run the script
-    proc = subprocess.Popen([
-        "osascript", "-e",
-        f'tell application "Terminal" to do script "{runner}"'
-    ])
+    # Open Terminal.app, run the script, and capture the window ID.
+    # The "; exit 0" makes zsh exit after the script finishes.
+    result = subprocess.run([
+        "osascript", "-e", f'''
+            tell application "Terminal"
+                set t to do script "bash \\"{runner}\\"; exit 0"
+                return id of window 1 whose tabs contains t
+            end tell
+        '''
+    ], capture_output=True, text=True, timeout=10)
 
-    time.sleep(2)
-    if proc.poll() is not None and proc.returncode != 0:
-        print(f"[claude] osascript failed with code {proc.returncode}")
-        return False
+    if result.returncode != 0 or not result.stdout.strip().isdigit():
+        print(f"[claude] osascript launch failed: {result.stderr.strip()}")
+        return RESULT_ERROR
+    window_id = int(result.stdout.strip())
 
-    print(f"[claude] Terminal launched, waiting for completion...")
+    print(f"[claude] Terminal launched (window {window_id}), polling DB for completion...")
 
-    # Poll for the _done flag
+    # Poll DB for status change
     start = time.time()
     while time.time() - start < timeout:
-        if os.path.exists(done_flag):
-            print(f"[claude] Finished in {int(time.time() - start)}s")
-            # Close the Terminal tab
-            subprocess.run([
-                "osascript", "-e",
-                'tell application "Terminal" to close front window'
-            ], capture_output=True, timeout=10)
-            return True
-        time.sleep(5)
+        try:
+            rows = db.get(status_table, id=status_id, select="status")
+            if not rows:
+                elapsed = int(time.time() - start)
+                print(f"[claude] Status row not found for {status_table}/{status_id} after {elapsed}s")
+                _exit_claude_and_close_terminal(window_id)
+                return RESULT_ERROR
+            status = rows[0].get("status")
+            if status in ("completed", "error"):
+                elapsed = int(time.time() - start)
+                print(f"[claude] DB status={status} after {elapsed}s")
+                _exit_claude_and_close_terminal(window_id)
+                return RESULT_COMPLETED if status == "completed" else RESULT_ERROR
+        except Exception as e:
+            print(f"[claude] DB poll error (will retry): {e}", file=sys.stderr)
+        time.sleep(DB_POLL_INTERVAL)
 
-    print(f"[claude] Timed out after {timeout}s")
-    # Close the Terminal tab on timeout too — don't leave orphaned windows
-    subprocess.run([
-        "osascript", "-e",
-        'tell application "Terminal" to close front window'
-    ], capture_output=True, timeout=10)
-    return False
+    elapsed = int(time.time() - start)
+    print(f"[claude] Timed out after {elapsed}s")
+    _exit_claude_and_close_terminal(window_id)
+    return RESULT_TIMEOUT
 
 
 def _run_estimation_job(job):
@@ -287,26 +348,20 @@ def _run_estimation_job(job):
         ]
         prompt = "\n".join(prompt_lines)
 
-        success = _launch_claude_terminal(prompt, tmpdir)
+        result = _launch_claude_terminal(prompt, tmpdir, status_table="projects", status_id=project_id)
 
-        if success:
-            project_check = db.get("projects", id=project_id, select="status")
-            if project_check and project_check[0].get("status") == "completed":
-                db.patch("estimation_jobs", {
-                    "status": "completed",
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                }, id=job_id)
-            else:
-                db.patch("estimation_jobs", {
-                    "status": "error",
-                    "error_message": "Claude Code finished but save-to-db did not complete",
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                }, id=job_id)
-                db.patch("projects", {
-                    "status": "error",
-                    "error_message": "Estimation completed but results were not saved to database",
-                }, id=project_id)
-        else:
+        if result == RESULT_COMPLETED:
+            db.patch("estimation_jobs", {
+                "status": "completed",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }, id=job_id)
+        elif result == RESULT_ERROR:
+            db.patch("estimation_jobs", {
+                "status": "error",
+                "error_message": "Estimation failed — check project error_message",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }, id=job_id)
+        else:  # RESULT_TIMEOUT
             db.patch("estimation_jobs", {
                 "status": "error",
                 "error_message": "Timed out waiting for Claude Code to finish",
@@ -323,6 +378,7 @@ def _run_estimation_job(job):
         db.patch("projects", {"status": "error", "error_message": str(e)[:200]}, id=project_id)
 
     finally:
+        _cleanup_session_data(tmpdir)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -350,41 +406,26 @@ def _run_scenario_job(job):
             f"When done, run /plan2bid:save-scenario-to-db {scenario_id} {project_id}"
         )
 
-        success = _launch_claude_terminal(prompt, tmpdir)
+        result = _launch_claude_terminal(prompt, tmpdir, status_table="scenarios", status_id=scenario_id)
 
-        if success:
-            # Verify scenario save actually completed
-            scenario_check = db.get("scenarios", id=scenario_id, select="status")
-            if scenario_check and scenario_check[0].get("status") == "completed":
-                db.patch("estimation_jobs", {
-                    "status": "completed",
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                }, id=job_id)
-            else:
-                db.patch("estimation_jobs", {
-                    "status": "error",
-                    "error_message": "Claude Code finished but save-scenario-to-db did not complete",
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                }, id=job_id)
-                db.patch("scenarios", {
-                    "status": "error",
-                    "error_message": "Scenario completed but results were not saved",
-                }, id=scenario_id)
-        else:
+        if result == RESULT_COMPLETED:
+            db.patch("estimation_jobs", {
+                "status": "completed",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }, id=job_id)
+        elif result == RESULT_ERROR:
+            db.patch("estimation_jobs", {
+                "status": "error",
+                "error_message": "Scenario failed — check scenario error_message",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }, id=job_id)
+        else:  # RESULT_TIMEOUT
             db.patch("estimation_jobs", {
                 "status": "error",
                 "error_message": "Timed out waiting for Claude Code to finish",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }, id=job_id)
             db.patch("scenarios", {"status": "error", "error_message": "Scenario timed out"}, id=scenario_id)
-
-    except subprocess.TimeoutExpired:
-        db.patch("estimation_jobs", {
-            "status": "error",
-            "error_message": f"Job timed out after {JOB_TIMEOUT}s",
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }, id=job_id)
-        db.patch("scenarios", {"status": "error"}, id=scenario_id)
 
     except Exception as e:
         db.patch("estimation_jobs", {
@@ -395,6 +436,7 @@ def _run_scenario_job(job):
         db.patch("scenarios", {"status": "error"}, id=scenario_id)
 
     finally:
+        _cleanup_session_data(tmpdir)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

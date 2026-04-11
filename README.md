@@ -46,16 +46,18 @@ Claude Code will read the CLAUDE.md and do everything automatically.
 while True:
     1. Check estimation_jobs table for pending jobs (polls every 5s)
     2. If found: claim it (optimistic lock — prevents double-claiming)
-    3. Download ZIP from Supabase Storage
-    4. Extract to temp directory
-    5. Open a VISIBLE Terminal window with:
+    3. Download ZIP/PDF from Supabase Storage
+    4. Extract to temp directory (ZIPs) or leave as-is (single files)
+    5. Pre-trust the directory in ~/.claude.json (bypasses trust dialog)
+    6. Open a VISIBLE Terminal window with:
        claude --dangerously-skip-permissions "Run /plan2bid:run ... then /plan2bid:save-to-db {project_id}"
-    6. You can WATCH Claude Code work in the Terminal window
-    7. Claude reads docs, extracts items, prices materials, estimates labor
-    8. /plan2bid:save-to-db calls save_estimate.py which writes to all DB tables
-    9. Terminal window closes automatically when done
-    10. Worker marks job complete, cleans up temp files
-    11. Back to polling
+    7. You can WATCH Claude Code work in the Terminal window
+    8. Claude reads docs, extracts items, prices materials, estimates labor
+    9. /plan2bid:save-to-db calls save_estimate.py → sets project.status = "completed"
+    10. Worker polls DB every 15s — detects status change to completed/error
+    11. Worker sends double Ctrl+C to exit Claude, Terminal window closes automatically
+    12. Worker cleans up temp files + Claude session data, marks job complete
+    13. Back to polling
 ```
 
 ### Why visible Terminal (not headless)
@@ -198,7 +200,7 @@ GROUP BY status;
 - Workers alive but idle? Check their logs for errors.
 
 **Jobs stuck in "running":**
-- The stale job reaper re-queues after 35 minutes automatically
+- The stale job reaper re-queues after 150 minutes automatically
 - Manual fix: `UPDATE estimation_jobs SET status='pending', worker_id=NULL WHERE id='...'`
 
 **Terminal window doesn't open:**
@@ -217,5 +219,6 @@ GROUP BY status;
 
 **Worker runs out of disk:**
 - Temp directories are cleaned up after each job
-- Check `/tmp/` for orphaned `plan2bid_*` directories
-- `rm -rf /tmp/plan2bid_*` to clean up
+- Claude session data (`~/.claude/projects/` and `~/.claude/session-env/`) is cleaned up automatically after each job
+- Check `/tmp/` for orphaned `plan2bid_*` directories: `rm -rf /tmp/plan2bid_*`
+- Manual session cleanup: `find ~/.claude/projects/-private-tmp-* -mtime +7 -exec rm -rf {} +`
