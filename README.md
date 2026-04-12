@@ -1,6 +1,6 @@
 # Plan2Bid Worker
 
-Estimation worker daemon for Plan2Bid. Runs on Mac Minis. Polls Supabase for estimation jobs, opens a **visible Terminal window** with Claude Code to run `/plan2bid:run`, saves results back to the database.
+Estimation and scenario worker daemon for Plan2Bid. Runs on Mac Minis. Polls Supabase for jobs (estimations and what-if scenarios), opens a **visible Terminal window** with Claude Code to run `/plan2bid:run` or `/plan2bid:scenarios`, saves results back to the database.
 
 **Skills repo:** https://github.com/nkpardon8-prog/claude-dotfiles (cloned to `~/.claude-dotfiles` on each worker)
 
@@ -46,20 +46,30 @@ Claude Code will read the CLAUDE.md and do everything automatically.
 while True:
     1. Check estimation_jobs table for pending jobs (polls every 5s)
     2. If found: claim it (optimistic lock — prevents double-claiming)
-    3. Download ZIP/PDF from Supabase Storage
-    4. Extract to temp directory (ZIPs) or leave as-is (single files)
-    5. Pre-trust the directory in ~/.claude.json (bypasses trust dialog)
-    6. Open a VISIBLE Terminal window with:
-       claude --dangerously-skip-permissions "Run /plan2bid:run to estimate this project."
-    7. You can WATCH Claude Code work in the Terminal window
-    8. Claude reads docs, extracts items, prices materials, estimates labor
-    9. /plan2bid:run writes estimate_output.json, then calls /plan2bid:save-to-db → sets project.status = "completed"
-    10. Worker polls DB every 15s — detects status change to "completed"
-        (ignores "error" — Claude may be retrying a failed save)
-    11. Worker sends /exit to Claude Code, Terminal window closes automatically
-    12. Worker cleans up temp files + Claude session data, marks job complete
-    13. Back to polling
+    3. Route by job_type:
+       - "estimation" → _run_estimation_job (download ZIP, run /plan2bid:run)
+       - "scenario"   → _run_scenario_job (fetch base estimate, run /plan2bid:scenarios)
+    4. Pre-trust the temp directory in ~/.claude.json (bypasses trust dialog)
+    5. Open a VISIBLE Terminal window with:
+       claude --dangerously-skip-permissions "{prompt}"
+    6. You can WATCH Claude Code work in the Terminal window
+    7. Worker polls DB every 15s — detects status change to "completed"
+    8. Worker sends /exit to Claude Code, Terminal window closes automatically
+    9. Worker cleans up temp files + Claude session data, marks job complete
+    10. Back to polling
 ```
+
+### Estimation jobs
+- Downloads ZIP/PDF from Supabase Storage, extracts to temp dir
+- Claude runs `/plan2bid:run` → reads docs, extracts items, prices materials, estimates labor
+- `/plan2bid:save-to-db` writes results → sets `projects.status = "completed"`
+
+### Scenario jobs (what-if re-pricing)
+- Fetches the base estimate data from `material_items`/`labor_items` tables, merges into flat `line_items` format with `is_material`/`is_labor` flags
+- Includes project context (location, facility type, trades) in the prompt
+- Claude runs `/plan2bid:scenarios` → re-prices affected items based on user's scenario context
+- `/plan2bid:save-scenario-to-db` writes results to `scenario_*` tables → sets `scenarios.status = "completed"`
+- Scenarios share the same job queue as estimations — 3 workers can process any mix of estimates and scenarios
 
 ### Why visible Terminal (not headless)
 
@@ -219,6 +229,16 @@ GROUP BY status;
 - The stale job reaper re-queues after 150 minutes automatically
 - If Claude is retrying a failed save, this is expected — check the Terminal window
 - Manual fix: `UPDATE estimation_jobs SET status='pending', worker_id=NULL WHERE id='...'`
+
+**Scenarios stuck in "pending":**
+- Scenarios are dispatched via `estimation_jobs` with `job_type='scenario'`
+- Check that the worker is running and polling
+- Scenario jobs have a 24-hour `expires_at` TTL — expired jobs are auto-cancelled
+
+**Scenarios stuck in "running":**
+- Check the Terminal window for the scenario job
+- If the worker crashed, the scenario stays "running" (stale reaper handles `estimation_jobs` but not `scenarios` table)
+- Manual fix: `UPDATE scenarios SET status='error', error_message='Manual reset' WHERE id='...'`
 
 **Terminal window doesn't open:**
 - Make sure the Mac Mini has a display connected (or VNC/Screen Sharing active)
