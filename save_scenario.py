@@ -80,6 +80,7 @@ def write_scenario_to_db(scenario_id, project_id, output):
     # 6. Update scenario status
     db.patch("scenarios", {
         "status": "completed",
+        "progress": 100,
         "summary": output.get("summary"),
         "reasoning": output.get("reasoning"),
     }, id=scenario_id)
