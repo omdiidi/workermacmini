@@ -187,7 +187,7 @@ npm update -g @anthropic-ai/claude-code
 
 ```sql
 -- Worker fleet status
-SELECT id, status, last_heartbeat, jobs_completed, jobs_failed FROM workers ORDER BY id;
+SELECT id, status, current_job_id, last_heartbeat FROM workers ORDER BY id;
 
 -- Queue depth
 SELECT COUNT(*) AS pending FROM estimation_jobs WHERE status = 'pending';
