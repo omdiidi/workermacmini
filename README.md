@@ -50,10 +50,10 @@ while True:
     4. Extract to temp directory (ZIPs) or leave as-is (single files)
     5. Pre-trust the directory in ~/.claude.json (bypasses trust dialog)
     6. Open a VISIBLE Terminal window with:
-       claude --dangerously-skip-permissions "Run /plan2bid:run ... then /plan2bid:save-to-db {project_id}"
+       claude --dangerously-skip-permissions "Run /plan2bid:run to estimate this project."
     7. You can WATCH Claude Code work in the Terminal window
     8. Claude reads docs, extracts items, prices materials, estimates labor
-    9. /plan2bid:save-to-db calls save_estimate.py → sets project.status = "completed"
+    9. /plan2bid:run writes estimate_output.json, then calls /plan2bid:save-to-db → sets project.status = "completed"
     10. Worker polls DB every 15s — detects status change to "completed"
         (ignores "error" — Claude may be retrying a failed save)
     11. Worker sends double Ctrl+C to exit Claude, Terminal window closes automatically
@@ -87,7 +87,7 @@ The Terminal launch uses `osascript` (AppleScript) which is macOS-specific. This
 plan2bid-worker/
 ├── worker.py           # Job polling daemon + Terminal launcher
 ├── supabase_client.py  # Shared PostgREST helpers
-├── save_estimate.py    # Estimate JSON → DB tables (called by /plan2bid:save-to-db skill)
+├── save_estimate.py    # Estimate JSON → DB tables (called by /plan2bid:save-to-db, invoked at end of /plan2bid:run)
 ├── save_scenario.py    # Scenario JSON → scenario mirror tables
 ├── .env                # SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (not in git)
 ├── .env.example
