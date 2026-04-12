@@ -56,7 +56,7 @@ while True:
     9. /plan2bid:run writes estimate_output.json, then calls /plan2bid:save-to-db → sets project.status = "completed"
     10. Worker polls DB every 15s — detects status change to "completed"
         (ignores "error" — Claude may be retrying a failed save)
-    11. Worker sends double Ctrl+C to exit Claude, Terminal window closes automatically
+    11. Worker sends /exit to Claude Code, Terminal window closes automatically
     12. Worker cleans up temp files + Claude session data, marks job complete
     13. Back to polling
 ```
