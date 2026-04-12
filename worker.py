@@ -115,26 +115,26 @@ def _ensure_directory_trusted(directory):
 
 
 def _exit_claude_and_close_terminal(window_id):
-    """Send double Ctrl+C to exit Claude in the specified window, then close it.
+    """Send /exit to Claude Code in the specified window, then close it.
 
-    Uses 'do script (ASCII character 3)' which sends Ctrl+C directly to the
-    specific tab without needing Accessibility permissions or window focus.
+    /exit is Claude Code's built-in clean shutdown command. When sent to the
+    idle prompt via 'do script', Claude exits through its proper shutdown path.
+    Verified: /exit -> Claude exits -> shell runs exit 0 -> [Process completed]
+    -> window closes with no dialog.
     """
     try:
         subprocess.run(["osascript", "-e", f'''
             tell application "Terminal"
-                do script (ASCII character 3) in tab 1 of window id {window_id}
-                delay 0.3
-                do script (ASCII character 3) in tab 1 of window id {window_id}
+                do script "/exit" in tab 1 of window id {window_id}
             end tell
         '''], capture_output=True, timeout=10)
     except Exception as e:
-        print(f"[claude] Ctrl+C send failed (window may be gone): {e}")
+        print(f"[claude] /exit send failed (window may be gone): {e}")
 
-    # Wait for exit chain: Claude exits -> _run.sh finishes -> bash exits -> exit 0
-    time.sleep(3)
+    # Wait for exit chain: /exit -> Claude exits -> _run.sh finishes -> exit 0 -> shell exits
+    time.sleep(5)
 
-    # Close the specific window by ID. "saving no" suppresses any dialog as safety net.
+    # Close the window. By now [Process completed] should be showing — no running processes.
     try:
         subprocess.run(["osascript", "-e",
             f'tell application "Terminal" to close window id {window_id} saving no'
