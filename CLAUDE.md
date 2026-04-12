@@ -11,7 +11,7 @@ This is the estimation worker daemon for Plan2Bid. It runs on Mac Minis and open
 - A display connected (or VNC/Screen Sharing) — Terminal windows must be able to open
 - Claude Code installed: `npm install -g @anthropic-ai/claude-code`
 - Logged into Claude Max: run `claude` once interactively and authenticate
-- `claude` accessible at `/usr/local/bin/claude` — if not, create symlink: `sudo ln -s $(which claude) /usr/local/bin/claude`
+- `claude` accessible in PATH — check with `which claude`. Common locations: `~/.local/bin/claude` or `/usr/local/bin/claude`
 - Supabase `estimation_jobs` and `workers` tables created (see README.md for SQL)
 - Supabase `project-files` Storage bucket created
 
@@ -54,9 +54,9 @@ Ask the user to fill in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env`
 claude --version
 ```
 
-If this fails, create a symlink:
+If this fails, check where claude is installed (`find / -name claude -type f 2>/dev/null`) and either add that directory to PATH or create a symlink:
 ```bash
-sudo ln -s $(which claude) /usr/local/bin/claude
+sudo ln -s $(find ~/.local/bin /usr/local/bin /opt/homebrew/bin -name claude -type f 2>/dev/null | head -1) /usr/local/bin/claude
 ```
 
 ## 5. Set the hostname (optional)
@@ -77,7 +77,7 @@ source .venv/bin/activate
 python worker.py
 ```
 
-It should print "Worker worker-plan2bid-{name} starting..." and begin polling. When a job comes in, a Terminal window will open with Claude Code running. Press Ctrl+C to stop the worker once verified.
+It should print "Worker worker-{hostname}-1 starting..." and begin polling. When a job comes in, a Terminal window will open with Claude Code running. Press Ctrl+C to stop the worker once verified.
 
 ## 7. Install as background service(s) (macOS launchd)
 

@@ -122,9 +122,8 @@ Each Mac Mini can run up to 3 worker instances:
 ### Worker fleet example
 
 ```
-Mac Mini 1 (office shelf)     → worker-plan2bid-office-1
-Mac Mini 2 (office shelf)     → worker-plan2bid-office-2  
-Mac Mini 3 (home)             → worker-plan2bid-home-1
+Mac Mini 1 (office)  → worker-plan2bid-office-1, worker-plan2bid-office-2
+Mac Mini 2 (home)    → worker-plan2bid-home-1
 ```
 
 All polling the same table. All running the same skills. All writing to the same database.
@@ -150,9 +149,12 @@ All polling the same table. All running the same skills. All writing to the same
 
 ### Update worker code
 ```bash
-cd ~/plan2bid-worker
+cd ~/workermacmini  # or wherever the worker repo is cloned
 git pull
-# Restart worker (Ctrl+C then python worker.py, or reload launchd service)
+# Restart each instance:
+launchctl unload ~/Library/LaunchAgents/com.plan2bid.worker-1.plist
+launchctl load ~/Library/LaunchAgents/com.plan2bid.worker-1.plist
+# Repeat for worker-2, worker-3 if running multiple instances
 ```
 
 ### Update skills (no restart needed)
