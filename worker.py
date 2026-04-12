@@ -14,7 +14,14 @@ from datetime import datetime, timezone
 
 import supabase_client as db
 
-WORKER_ID = f"worker-{socket.gethostname()}"
+def _get_worker_id():
+    import argparse
+    parser = argparse.ArgumentParser(description="Plan2Bid worker daemon")
+    parser.add_argument("--instance", type=int, default=1, choices=[1, 2, 3], help="Instance number (1-3) for multi-worker setups")
+    args, _ = parser.parse_known_args()
+    return f"worker-{socket.gethostname()}-{args.instance}"
+
+WORKER_ID = _get_worker_id()
 JOB_TIMEOUT = 7200
 POLL_INTERVAL = 5
 HEARTBEAT_INTERVAL = 30

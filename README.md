@@ -100,13 +100,24 @@ plan2bid-worker/
 
 ## Adding More Workers
 
-1. Get a Mac Mini
-2. Install Claude Code + log into Max account
-3. `git clone https://github.com/omdiidi/workermacmini.git`
-4. Open Claude Code in it, say "set up this worker"
-5. Done
+### Adding capacity on the same machine
 
-**No changes needed on the backend. No config updates. No load balancer.** The new worker just starts polling the same `estimation_jobs` table and claiming jobs.
+Each Mac Mini can run up to 3 worker instances:
+
+1. Create additional launchd plists with `--instance 2` and `--instance 3` (see CLAUDE.md step 7)
+2. Load them: `launchctl load ~/Library/LaunchAgents/com.plan2bid.worker-2.plist`
+3. Each instance gets its own job, log file, and heartbeat
+
+### Adding a new Mac Mini
+
+1. Get a Mac Mini
+2. Install Claude Code: `npm install -g @anthropic-ai/claude-code`
+3. Log into Claude Max: run `claude` once interactively
+4. `git clone https://github.com/omdiidi/workermacmini.git`
+5. Open Claude Code in it, say "set up this worker"
+6. Done — the new worker immediately starts polling the same job queue
+
+**No changes needed on the backend, database, or other workers.**
 
 ### Worker fleet example
 
@@ -122,12 +133,14 @@ All polling the same table. All running the same skills. All writing to the same
 
 ## Scaling
 
-| Workers | Jobs/Hour (10 min avg) | Cost/Month (Max plan) |
-|---------|------------------------|-----------------------|
-| 1       | ~6                     | $100-200              |
-| 2       | ~12                    | $200-400              |
-| 3       | ~18                    | $300-600              |
-| 5       | ~30                    | $500-1000             |
+| Setup                | Workers | Jobs/Hour (10 min avg) |
+|----------------------|---------|------------------------|
+| 1 Mini, 1 instance   | 1       | ~6                     |
+| 1 Mini, 2 instances  | 2       | ~12                    |
+| 1 Mini, 3 instances  | 3       | ~18                    |
+| 2 Minis, 3 each      | 6       | ~36                    |
+
+**Note:** All instances on the same machine share one Claude Max account. Throughput may be lower than linear if the account hits rate limits under heavy concurrent use.
 
 **When to add a worker:** If average queue depth during peak hours stays above 5 and users wait > 15 minutes.
 

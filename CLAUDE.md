@@ -59,14 +59,16 @@ If this fails, create a symlink:
 sudo ln -s $(which claude) /usr/local/bin/claude
 ```
 
-## 5. Set the hostname (for unique worker ID)
+## 5. Set the hostname (optional)
 
-Ask the user what to name this worker (e.g., "worker-1", "worker-office", "worker-mini-m4"). Then:
+The worker automatically uses the machine's hostname for its ID. If you want a custom name:
 
 ```bash
 sudo scutil --set HostName plan2bid-{name}
 sudo scutil --set LocalHostName plan2bid-{name}
 ```
+
+This is optional — the default hostname works fine.
 
 ## 6. Test the worker
 
@@ -77,26 +79,28 @@ python worker.py
 
 It should print "Worker worker-plan2bid-{name} starting..." and begin polling. When a job comes in, a Terminal window will open with Claude Code running. Press Ctrl+C to stop the worker once verified.
 
-## 7. Install as a background service (macOS launchd)
+## 7. Install as background service(s) (macOS launchd)
 
-**Important:** The worker opens Terminal windows, so it must run as the logged-in user (not as a system daemon). The launchd agent runs in the user's session.
+**Important:** The worker opens Terminal windows, so it must run as the logged-in user (not as a system daemon).
 
-Create the launchd plist:
+Ask the user how many worker instances to run (1-3, default 1). Each instance processes jobs independently. For each instance N (replace N with 1, 2, or 3):
 
 ```bash
 mkdir -p ~/Library/LaunchAgents logs
 
-cat > ~/Library/LaunchAgents/com.plan2bid.worker.plist << 'PLIST'
+cat > ~/Library/LaunchAgents/com.plan2bid.worker-N.plist << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.plan2bid.worker</string>
+    <string>com.plan2bid.worker-N</string>
     <key>ProgramArguments</key>
     <array>
         <string>VENV_PYTHON</string>
         <string>WORKER_PY</string>
+        <string>--instance</string>
+        <string>N</string>
     </array>
     <key>WorkingDirectory</key>
     <string>WORKER_DIR</string>
@@ -105,9 +109,9 @@ cat > ~/Library/LaunchAgents/com.plan2bid.worker.plist << 'PLIST'
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>WORKER_DIR/logs/worker.log</string>
+    <string>WORKER_DIR/logs/worker-N.log</string>
     <key>StandardErrorPath</key>
-    <string>WORKER_DIR/logs/worker.err</string>
+    <string>WORKER_DIR/logs/worker-N.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -118,22 +122,23 @@ cat > ~/Library/LaunchAgents/com.plan2bid.worker.plist << 'PLIST'
 PLIST
 ```
 
-Replace `VENV_PYTHON`, `WORKER_PY`, and `WORKER_DIR` with the actual absolute paths for this machine. For example:
-- VENV_PYTHON: `/Users/username/plan2bid-worker/.venv/bin/python`
-- WORKER_PY: `/Users/username/plan2bid-worker/worker.py`
-- WORKER_DIR: `/Users/username/plan2bid-worker`
+Replace `VENV_PYTHON`, `WORKER_PY`, `WORKER_DIR` with actual absolute paths. Replace `N` with the instance number.
 
-Then load the service:
+Then load each service:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.plan2bid.worker.plist
+launchctl load ~/Library/LaunchAgents/com.plan2bid.worker-N.plist
 ```
+
+For a single worker, just create instance 1. For 3 workers: create instances 1, 2, and 3.
+
+**Note:** If a trust dialog appears unexpectedly on a multi-instance setup, restart the affected instance — this is a rare race condition when two workers launch simultaneously.
 
 ## 8. Verify
 
 ```bash
 launchctl list | grep plan2bid
-tail -f logs/worker.log
+tail -f logs/worker-1.log  # or worker-2.log, worker-3.log
 ```
 
-The worker is now running as a background service. It will survive reboots, auto-restart on crashes, and immediately start picking up jobs. When a job comes in, you'll see a Terminal window open on the Mac Mini's screen with Claude Code running the estimation.
+Check the `workers` table in Supabase — you should see one row per instance (e.g., `worker-plan2bid-minim4-1`, `worker-plan2bid-minim4-2`). Each instance picks up jobs independently from the shared queue.
