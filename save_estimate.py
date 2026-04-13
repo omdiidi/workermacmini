@@ -8,14 +8,30 @@ import supabase_client as db
 
 def write_estimation_to_db(project_id, output):
     """Decompose agent structured output into DB table inserts."""
+    try:
+        return _write_estimation_to_db_inner(project_id, output)
+    except Exception as e:
+        try:
+            db.patch("projects", {
+                "status": "error",
+                "error_message": f"Save failed: {str(e)[:500]}",
+            }, id=project_id)
+        except Exception:
+            pass
+        raise
+
+
+def _write_estimation_to_db_inner(project_id, output):
     trades_seen = set()
 
     all_items = output.get("line_items", [])
     if not all_items:
-        print(f"[save] ERROR: No line_items array found in estimate_output.json.", file=sys.stderr)
-        print(f"[save] Expected a top-level 'line_items' array with objects containing 'is_material', 'is_labor', 'trade', 'description', 'quantity', etc.", file=sys.stderr)
-        print(f"[save] Reformat estimate_output.json to match this schema and run save-to-db again.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(
+            "No line_items array found in estimate_output.json. "
+            "Expected a top-level 'line_items' array with objects containing "
+            "'is_material', 'is_labor', 'trade', 'description', 'quantity', etc. "
+            "Reformat estimate_output.json to match this schema and run save-to-db again."
+        )
 
     items_by_trade = {}
     for li in all_items:
@@ -52,9 +68,9 @@ def write_estimation_to_db(project_id, output):
         # 4. material_metadata — trust LLM's extended costs (may include volume discounts)
         mat_items = [li for li in items if li.get("is_material")]
         def _mat_ext(li, field_ext, field_uc):
-            val = float(li.get(field_ext, 0) or 0)
-            if val > 0:
-                return val
+            raw = li.get(field_ext)
+            if raw is not None and raw != "":
+                return float(raw)
             qty = float(li.get("quantity", 0) or 0)
             uc = float(li.get(field_uc, 0) or 0)
             return round(qty * uc, 2)
@@ -160,9 +176,9 @@ def write_estimation_to_db(project_id, output):
     mat_total = 0.0
     for li in all_items:
         if li.get("is_material"):
-            ext = float(li.get("extended_cost_expected", 0) or 0)
-            if ext > 0:
-                mat_total += ext
+            raw = li.get("extended_cost_expected")
+            if raw is not None and raw != "":
+                mat_total += float(raw)
             else:
                 qty = float(li.get("quantity", 0) or 0)
                 uc = float(li.get("unit_cost_expected", 0) or 0)
@@ -221,9 +237,12 @@ def _to_material_row(project_id, li):
     # Use the LLM's extended_cost if provided — it may reflect volume discounts,
     # negotiated pricing, or package deals that differ from simple qty * unit_cost.
     # Only fall back to multiplication when extended_cost is missing.
-    ext_exp = float(li.get("extended_cost_expected", 0) or 0) or round(qty * uc_exp, 2)
-    ext_low = float(li.get("extended_cost_low", 0) or 0) or round(qty * uc_low, 2)
-    ext_high = float(li.get("extended_cost_high", 0) or 0) or round(qty * uc_high, 2)
+    _raw = li.get("extended_cost_expected")
+    ext_exp = float(_raw) if _raw is not None and _raw != "" else round(qty * uc_exp, 2)
+    _raw = li.get("extended_cost_low")
+    ext_low = float(_raw) if _raw is not None and _raw != "" else round(qty * uc_low, 2)
+    _raw = li.get("extended_cost_high")
+    ext_high = float(_raw) if _raw is not None and _raw != "" else round(qty * uc_high, 2)
 
     return {
         "project_id": project_id,

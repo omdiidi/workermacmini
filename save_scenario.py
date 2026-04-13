@@ -1,12 +1,26 @@
 """Save scenario results JSON to Supabase scenario mirror tables."""
 import argparse
 import json
-import sys
 
 import supabase_client as db
 
 
 def write_scenario_to_db(scenario_id, project_id, output):
+    """Decompose scenario agent output into scenario mirror tables."""
+    try:
+        return _write_scenario_to_db_inner(scenario_id, project_id, output)
+    except Exception as e:
+        try:
+            db.patch("scenarios", {
+                "status": "error",
+                "error_message": f"Save failed: {str(e)[:500]}",
+            }, id=scenario_id)
+        except Exception:
+            pass
+        raise
+
+
+def _write_scenario_to_db_inner(scenario_id, project_id, output):
     """Decompose scenario agent output into scenario mirror tables."""
     items_by_trade = {}
     for li in output.get("line_items", []):
@@ -14,9 +28,10 @@ def write_scenario_to_db(scenario_id, project_id, output):
         items_by_trade.setdefault(trade, []).append(li)
 
     if not items_by_trade:
-        print(f"[save] ERROR: No line_items found in scenario_output.json.", file=sys.stderr)
-        print(f"[save] Expected a top-level 'line_items' array. Reformat and retry.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(
+            "No line_items found in scenario_output.json. "
+            "Expected a top-level 'line_items' array. Reformat and retry."
+        )
 
     for trade, items in items_by_trade.items():
         # 1. scenario_material_items
@@ -28,9 +43,9 @@ def write_scenario_to_db(scenario_id, project_id, output):
         # 2. scenario_material_metadata — trust LLM's extended costs
         mat_items = [li for li in items if li.get("is_material")]
         def _mat_ext(li, field_ext, field_uc):
-            val = float(li.get(field_ext, 0) or 0)
-            if val > 0:
-                return val
+            raw = li.get(field_ext)
+            if raw is not None and raw != "":
+                return float(raw)
             qty = float(li.get("quantity", 0) or 0)
             uc = float(li.get(field_uc, 0) or 0)
             return round(qty * uc, 2)
@@ -110,9 +125,12 @@ def _to_scenario_material_row(scenario_id, project_id, li):
     uc_exp = float(li.get("unit_cost_expected", 0) or 0)
     uc_high = float(li.get("unit_cost_high", 0) or 0)
 
-    ext_exp = float(li.get("extended_cost_expected", 0) or 0) or round(qty * uc_exp, 2)
-    ext_low = float(li.get("extended_cost_low", 0) or 0) or round(qty * uc_low, 2)
-    ext_high = float(li.get("extended_cost_high", 0) or 0) or round(qty * uc_high, 2)
+    _raw = li.get("extended_cost_expected")
+    ext_exp = float(_raw) if _raw is not None and _raw != "" else round(qty * uc_exp, 2)
+    _raw = li.get("extended_cost_low")
+    ext_low = float(_raw) if _raw is not None and _raw != "" else round(qty * uc_low, 2)
+    _raw = li.get("extended_cost_high")
+    ext_high = float(_raw) if _raw is not None and _raw != "" else round(qty * uc_high, 2)
 
     return {
         "scenario_id": scenario_id,
