@@ -74,3 +74,8 @@ def download_storage(bucket, path):
     resp = _client.get(url)
     resp.raise_for_status()
     return resp.content
+
+
+def close():
+    """Close the httpx client connection pool."""
+    _client.close()

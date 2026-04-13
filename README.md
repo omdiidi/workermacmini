@@ -19,7 +19,7 @@ The FastAPI backend writes a job row to Supabase. The worker reads it. The worke
 
 ---
 
-## Quick Start (Open Claude Code and say "set up this worker")
+## Quick Start
 
 ### Prerequisites
 You need TWO things on the Mac Mini before anything else:
@@ -28,13 +28,63 @@ You need TWO things on the Mac Mini before anything else:
 
 ### Then:
 
-Clone this repo on the Mac Mini, open Claude Code in it, and say:
+```bash
+git clone https://github.com/omdiidi/workermacmini.git
+cd workermacmini
+bash setup.sh --workers 1 --role primary
+```
+
+Or open Claude Code in the repo and say: `Set up this worker. Follow the CLAUDE.md instructions.`
+
+---
+
+## Multi-Machine Design
+
+### How priority works
+
+Workers use **soft priority via polling interval**. No inter-worker communication — the database is the sole coordination layer.
+
+| Role | Poll interval | Behavior |
+|------|--------------|----------|
+| Primary | 5 seconds | First to see new jobs, claims them fast |
+| Secondary | 15 seconds | Backup — picks up jobs when primary is busy or offline |
+
+When both machines are online, the primary almost always grabs jobs first. When the primary is down, the secondary takes over within ~15 seconds. The atomic claim (UPDATE WHERE status='pending') prevents any double-execution.
+
+### Adding a new machine
+
+```bash
+# On the new Mac Mini:
+npm install -g @anthropic-ai/claude-code
+claude  # log in interactively once
+
+git clone https://github.com/omdiidi/workermacmini.git
+cd workermacmini
+bash setup.sh --workers 2 --role secondary
+```
+
+**No changes needed on the backend, database, or other workers.**
+
+### Worker fleet example
 
 ```
-Set up this worker. Follow the CLAUDE.md instructions.
+Mac Mini 1 (primary)    → worker-office-1       (5s poll, claims first)
+Mac Mini 2 (secondary)  → worker-backup-1       (15s poll, backup)
+                        → worker-backup-2       (15s poll, overflow)
 ```
 
-Claude Code will read the CLAUDE.md and do everything automatically.
+All polling the same table. All running the same skills. All writing to the same database.
+
+### Failover scenarios
+
+| Scenario | What happens |
+|----------|-------------|
+| Primary offline, secondary online | Secondary claims all new jobs (~15s delay) |
+| Both online | Primary usually wins the claim race; secondary handles overflow |
+| Primary mid-job, crashes | Worker heartbeat stops → backend reaper requeues job after 10 min → secondary picks it up |
+| Both offline | Jobs queue up in `pending` (24h TTL before auto-cancel) |
+| Secondary has 2 workers, primary has 1 | Up to 3 jobs can run concurrently |
+| Worker gets SIGTERM (launchd stop) | Graceful shutdown: requeues current job, marks worker offline, exits clean |
 
 ---
 
@@ -44,7 +94,7 @@ Claude Code will read the CLAUDE.md and do everything automatically.
 
 ```
 while True:
-    1. Check estimation_jobs table for pending jobs (polls every 5s)
+    1. Check estimation_jobs table for pending jobs (polls every 5s or 15s)
     2. If found: claim it (optimistic lock — prevents double-claiming)
     3. Route by job_type:
        - "estimation" → _run_estimation_job (download ZIP, run /plan2bid:run)
@@ -58,6 +108,27 @@ while True:
     9. Worker cleans up temp files + Claude session data, marks job complete
     10. Back to polling
 ```
+
+### Graceful shutdown (SIGTERM/SIGINT)
+
+When the worker receives SIGTERM (from `launchctl stop` or `teardown.sh`) or SIGINT (Ctrl+C):
+1. Sets a shutdown flag
+2. If mid-job: closes the Terminal window, requeues the job back to `pending`, resets project/scenario status
+3. If between jobs: breaks out of the polling loop
+4. Marks worker as `offline` in the `workers` table
+5. Closes the HTTP connection pool
+6. Exits cleanly
+
+No orphaned jobs. No orphaned Terminal windows. launchd's `KeepAlive` will NOT restart the worker after a clean SIGTERM — use `teardown.sh` to fully remove the service.
+
+### Stale job reaping
+
+The **backend API** runs a centralized reaper every 5 minutes (not workers). It handles:
+- **Stale running jobs**: If a worker's heartbeat is >10 min stale, its job is requeued (max 3 attempts, then marked as error)
+- **Expired pending jobs**: Jobs past their 24h TTL are cancelled
+- **Offline workers**: Workers with stale heartbeats are marked offline
+
+Workers do NOT run the reaper. On startup, each worker requeues only its own stuck jobs from a previous crash.
 
 ### Estimation jobs
 - Downloads ZIP/PDF from Supabase Storage, extracts to temp dir
@@ -86,6 +157,7 @@ while True:
 - Does not talk to FastAPI
 - Does not need a static IP
 - Does not need Docker/Kubernetes
+- Does not run the stale job reaper (backend does this)
 
 ### Important: macOS only
 
@@ -97,46 +169,16 @@ The Terminal launch uses `osascript` (AppleScript) which is macOS-specific. This
 plan2bid-worker/
 ├── worker.py           # Job polling daemon + Terminal launcher
 ├── supabase_client.py  # Shared PostgREST helpers
-├── save_estimate.py    # Estimate JSON → DB tables (called by /plan2bid:save-to-db, invoked at end of /plan2bid:run)
+├── save_estimate.py    # Estimate JSON → DB tables (called by /plan2bid:save-to-db)
 ├── save_scenario.py    # Scenario JSON → scenario mirror tables
+├── setup.sh            # One-command setup: venv, deps, launchd services
+├── teardown.sh         # Stop and remove all worker services
 ├── .env                # SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (not in git)
 ├── .env.example
 ├── requirements.txt    # httpx, python-dotenv
 ├── CLAUDE.md           # Setup instructions for Claude Code
 └── README.md           # This file
 ```
-
----
-
-## Adding More Workers
-
-### Adding capacity on the same machine
-
-Each Mac Mini can run up to 3 worker instances:
-
-1. Create additional launchd plists with `--instance 2` and `--instance 3` (see CLAUDE.md step 7)
-2. Load them: `launchctl load ~/Library/LaunchAgents/com.plan2bid.worker-2.plist`
-3. Each instance gets its own job, log file, and heartbeat
-
-### Adding a new Mac Mini
-
-1. Get a Mac Mini
-2. Install Claude Code: `npm install -g @anthropic-ai/claude-code`
-3. Log into Claude Max: run `claude` once interactively
-4. `git clone https://github.com/omdiidi/workermacmini.git`
-5. Open Claude Code in it, say "set up this worker"
-6. Done — the new worker immediately starts polling the same job queue
-
-**No changes needed on the backend, database, or other workers.**
-
-### Worker fleet example
-
-```
-Mac Mini 1 (office)  → worker-plan2bid-office-1, worker-plan2bid-office-2
-Mac Mini 2 (home)    → worker-plan2bid-home-1
-```
-
-All polling the same table. All running the same skills. All writing to the same database.
 
 ---
 
@@ -161,10 +203,8 @@ All polling the same table. All running the same skills. All writing to the same
 ```bash
 cd ~/workermacmini  # or wherever the worker repo is cloned
 git pull
-# Restart each instance:
-launchctl unload ~/Library/LaunchAgents/com.plan2bid.worker-1.plist
-launchctl load ~/Library/LaunchAgents/com.plan2bid.worker-1.plist
-# Repeat for worker-2, worker-3 if running multiple instances
+bash teardown.sh
+bash setup.sh --workers 2 --role primary  # re-create with same config
 ```
 
 ### Update skills (no restart needed)
@@ -200,6 +240,19 @@ SELECT
 FROM estimation_jobs 
 WHERE created_at > NOW() - INTERVAL '24 hours'
 GROUP BY status;
+
+-- Stale workers (should be empty if reaper is running)
+SELECT id, last_heartbeat, status
+FROM workers
+WHERE status != 'offline'
+  AND last_heartbeat < NOW() - INTERVAL '10 minutes';
+
+-- Jobs requeued multiple times (may indicate a persistent failure)
+SELECT id, project_id, error_message, status
+FROM estimation_jobs
+WHERE error_message LIKE '%Requeued:%'
+ORDER BY created_at DESC
+LIMIT 10;
 ```
 
 ### What to watch
@@ -210,6 +263,7 @@ GROUP BY status;
 | Worker heartbeat | < 60s ago | > 2 min | Check machine, restart service |
 | Job success rate | > 90% | < 80% | Check worker logs |
 | Avg job duration | 5-15 min | > 20 min | Check document sizes |
+| Requeue count | 0-1 | 3 (max) | Job has a persistent failure — check logs |
 
 ---
 
@@ -226,8 +280,9 @@ GROUP BY status;
 - Workers alive but idle? Check their logs for errors.
 
 **Jobs stuck in "running":**
-- The stale job reaper re-queues after 150 minutes automatically
+- The backend reaper requeues stale jobs every 5 minutes (10-min heartbeat threshold)
 - If Claude is retrying a failed save, this is expected — check the Terminal window
+- Jobs are requeued up to 3 times, then marked as error
 - Manual fix: `UPDATE estimation_jobs SET status='pending', worker_id=NULL WHERE id='...'`
 
 **Scenarios stuck in "pending":**
@@ -236,8 +291,7 @@ GROUP BY status;
 - Scenario jobs have a 24-hour `expires_at` TTL — expired jobs are auto-cancelled
 
 **Scenarios stuck in "running":**
-- Check the Terminal window for the scenario job
-- If the worker crashed, the scenario stays "running" (stale reaper handles `estimation_jobs` but not `scenarios` table)
+- The backend reaper handles scenario jobs too — checks `job_type` and resets `scenarios.status`
 - Manual fix: `UPDATE scenarios SET status='error', error_message='Manual reset' WHERE id='...'`
 
 **Terminal window doesn't open:**
@@ -248,7 +302,7 @@ GROUP BY status;
 **Claude Code auth expired:**
 - Open Terminal manually on the Mac Mini
 - Run `claude` interactively to re-authenticate
-- Restart the worker
+- Restart the worker: `bash teardown.sh && bash setup.sh --workers 1 --role primary`
 
 **Estimation produces wrong results:**
 - The working directory is cleaned up after each job
@@ -259,3 +313,38 @@ GROUP BY status;
 - Claude session data (`~/.claude/projects/` and `~/.claude/session-env/`) is cleaned up automatically after each job
 - Check `/tmp/` for orphaned `plan2bid_*` directories: `rm -rf /tmp/plan2bid_*`
 - Manual session cleanup: `find ~/.claude/projects/-private-tmp-* -mtime +7 -exec rm -rf {} +`
+
+---
+
+## Operational Runbook
+
+### Adding a new machine
+1. Get a Mac Mini with internet access
+2. Install Claude Code: `npm install -g @anthropic-ai/claude-code`
+3. Log into Claude Max: run `claude` once interactively
+4. Clone the worker repo: `git clone https://github.com/omdiidi/workermacmini.git`
+5. Run setup: `cd workermacmini && bash setup.sh --workers 2 --role secondary`
+6. Verify: `launchctl list | grep plan2bid` and check `workers` table in Supabase
+
+### Removing a machine
+1. Stop workers: `bash teardown.sh`
+2. Workers automatically mark themselves offline in the database
+3. No changes needed anywhere else
+
+### Manually requeuing a stuck job
+```sql
+UPDATE estimation_jobs
+SET status = 'pending', worker_id = NULL, started_at = NULL
+WHERE id = 'job-uuid-here';
+
+-- Also reset the project status:
+UPDATE projects SET status = 'queued', stage = 'queued', progress = 0
+WHERE id = 'project-id-here';
+```
+
+### Checking reaper health
+The backend reaper runs every 5 minutes. Check backend logs for:
+```
+Running job reaper cycle...
+```
+If you don't see this, the backend may not be running or the reaper task failed to start.

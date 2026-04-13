@@ -14,23 +14,31 @@ from datetime import datetime, timezone
 
 import supabase_client as db
 
-def _get_worker_id():
+def _parse_args():
     import argparse
     parser = argparse.ArgumentParser(description="Plan2Bid worker daemon")
     parser.add_argument("--instance", type=int, default=1, choices=[1, 2, 3], help="Instance number (1-3) for multi-worker setups")
+    parser.add_argument("--role", choices=["primary", "secondary"], default=None, help="Machine role (primary=5s poll, secondary=15s poll)")
+    parser.add_argument("--poll-interval", type=int, default=None, help="Custom poll interval in seconds (overrides --role)")
     args, _ = parser.parse_known_args()
-    return f"worker-{socket.gethostname()}-{args.instance}"
 
-WORKER_ID = _get_worker_id()
+    worker_id = f"worker-{socket.gethostname()}-{args.instance}"
+
+    role = args.role or os.environ.get("WORKER_ROLE", "primary")
+    default_interval = 5 if role == "primary" else 15
+    poll_interval = args.poll_interval or int(os.environ.get("POLL_INTERVAL", str(default_interval)))
+
+    return worker_id, poll_interval
+
+WORKER_ID, POLL_INTERVAL = _parse_args()
 JOB_TIMEOUT = 7200
-POLL_INTERVAL = 5
 HEARTBEAT_INTERVAL = 30
-STALE_THRESHOLD_MINUTES = 150
 DB_POLL_INTERVAL = 15
 
 RESULT_COMPLETED = "completed"
 RESULT_ERROR = "error"
 RESULT_TIMEOUT = "timeout"
+RESULT_SHUTDOWN = "shutdown"
 
 _current_job_id = None
 _shutdown_requested = False
@@ -44,6 +52,7 @@ def _handle_sigterm(signum, frame):
 
 
 signal.signal(signal.SIGTERM, _handle_sigterm)
+signal.signal(signal.SIGINT, _handle_sigterm)
 
 
 def claim_job():
@@ -232,9 +241,19 @@ claude --dangerously-skip-permissions "$(cat _prompt.txt)"
 
     print(f"[claude] Terminal launched (window {window_id}), polling DB for completion...")
 
+    if _shutdown_requested:
+        print(f"[claude] Shutdown requested immediately after launch — closing Terminal")
+        _exit_claude_and_close_terminal(window_id)
+        return RESULT_SHUTDOWN
+
     # Poll DB for status change
     start = time.time()
     while time.time() - start < timeout:
+        if _shutdown_requested:
+            print(f"[claude] Shutdown requested — requeuing job, closing Terminal")
+            _exit_claude_and_close_terminal(window_id)
+            return RESULT_SHUTDOWN
+
         try:
             rows = db.get(status_table, id=status_id, select="status")
             if not rows:
@@ -387,11 +406,23 @@ def _run_estimation_job(job):
             "",
             "IMPORTANT: This is a daemon/automated run. Do NOT ask clarifying questions. Do NOT wait for user input. Proceed with your best judgment on all ambiguities. State your assumptions in the output.",
             "",
+            "MARKUP NOTE: Line items must be DIRECT COSTS only (no markup baked in). The frontend applies markups separately. But DO include your recommended markup percentages (contingency, overhead, profit) in the output summary so the user has a starting point.",
+            "",
             f"Worker directory: {os.path.dirname(os.path.realpath(__file__))}",
         ]
         prompt = "\n".join(prompt_lines)
 
         result = _launch_claude_terminal(prompt, tmpdir, status_table="projects", status_id=project_id)
+
+        if result == RESULT_SHUTDOWN:
+            db.patch("estimation_jobs", {
+                "status": "pending",
+                "worker_id": None,
+                "started_at": None,
+                "error_message": f"Requeued: worker {WORKER_ID} shutting down",
+            }, id=job_id)
+            db.patch("projects", {"status": "queued", "stage": "queued", "progress": 0}, id=project_id)
+            return
 
         if result == RESULT_COMPLETED:
             db.patch("estimation_jobs", {
@@ -404,6 +435,7 @@ def _run_estimation_job(job):
                 "error_message": "Estimation failed — check project error_message",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }, id=job_id)
+            db.patch("projects", {"status": "error", "error_message": "Estimation failed"}, id=project_id)
         else:  # RESULT_TIMEOUT
             db.patch("estimation_jobs", {
                 "status": "error",
@@ -458,6 +490,16 @@ def _run_scenario_job(job):
         prompt = "\n".join(prompt_lines)
 
         result = _launch_claude_terminal(prompt, tmpdir, status_table="scenarios", status_id=scenario_id)
+
+        if result == RESULT_SHUTDOWN:
+            db.patch("estimation_jobs", {
+                "status": "pending",
+                "worker_id": None,
+                "started_at": None,
+                "error_message": f"Requeued: worker {WORKER_ID} shutting down",
+            }, id=job_id)
+            db.patch("scenarios", {"status": "pending"}, id=scenario_id)
+            return
 
         if result == RESULT_COMPLETED:
             db.patch("estimation_jobs", {
@@ -580,52 +622,25 @@ def heartbeat_loop():
                 "last_heartbeat": datetime.now(timezone.utc).isoformat(),
             }, on_conflict="id")
         except Exception as e:
-            print(f"[heartbeat] error: {e}", file=sys.stderr)
+            print(f"[heartbeat] error (retrying in 5s): {e}", file=sys.stderr)
+            time.sleep(5)
+            try:
+                with _lock:
+                    current = _current_job_id
+                status = "busy" if current else "idle"
+                db.upsert("workers", {
+                    "id": WORKER_ID,
+                    "status": status,
+                    "current_job_id": current,
+                    "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+                }, on_conflict="id")
+            except Exception as e2:
+                print(f"[heartbeat] retry also failed: {e2}", file=sys.stderr)
         time.sleep(HEARTBEAT_INTERVAL)
 
 
-def reap_stale_jobs():
-    rows = db.get(
-        "estimation_jobs",
-        status="running",
-        select="id,started_at",
-    )
-    for row in rows:
-        with _lock:
-            current = _current_job_id
-        if row["id"] == current:
-            continue
-        if not row.get("started_at"):
-            continue
-        started = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
-        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-        if elapsed > STALE_THRESHOLD_MINUTES * 60:
-            print(f"[reaper] re-queuing stale job {row['id']} (running for {int(elapsed)}s)")
-            db.patch("estimation_jobs", {
-                "status": "pending",
-                "worker_id": None,
-                "started_at": None,
-                "error_message": f"Re-queued: stale after {int(elapsed)}s",
-            }, id=row["id"])
-
-
-def reap_expired_pending():
-    rows = db.get(
-        "estimation_jobs",
-        status="pending",
-        select="id,expires_at",
-    )
-    now = datetime.now(timezone.utc)
-    for row in rows:
-        if row.get("expires_at"):
-            expires = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
-            if expires < now:
-                print(f"[reaper] cancelling expired job {row['id']}")
-                db.patch("estimation_jobs", {"status": "cancelled"}, id=row["id"])
-
-
 def main():
-    print(f"Worker {WORKER_ID} starting...")
+    print(f"Worker {WORKER_ID} starting (poll interval: {POLL_INTERVAL}s)...")
 
     t = threading.Thread(target=heartbeat_loop, daemon=True)
     t.start()
@@ -634,7 +649,7 @@ def main():
         "estimation_jobs",
         status="running",
         worker_id=WORKER_ID,
-        select="id",
+        select="id,job_type,project_id,scenario_id",
     )
     for row in stuck:
         print(f"[recovery] re-queuing stuck job {row['id']}")
@@ -643,6 +658,10 @@ def main():
             "worker_id": None,
             "started_at": None,
         }, id=row["id"])
+        if row.get("job_type") == "scenario" and row.get("scenario_id"):
+            db.patch("scenarios", {"status": "pending"}, id=row["scenario_id"])
+        else:
+            db.patch("projects", {"status": "queued", "stage": "queued", "progress": 0}, id=row.get("project_id"))
 
     while True:
         if _shutdown_requested:
@@ -656,28 +675,27 @@ def main():
             break
 
         try:
-            reap_stale_jobs()
-            reap_expired_pending()
-
             job = claim_job()
             if job:
+                if _shutdown_requested:
+                    # Requeue the just-claimed job before shutting down
+                    db.patch("estimation_jobs", {
+                        "status": "pending",
+                        "worker_id": None,
+                        "started_at": None,
+                    }, id=job["id"])
+                    print(f"[worker] Requeued just-claimed job {job['id']} due to shutdown")
+                    break
                 print(f"[worker] claimed job {job['id']} (type={job.get('job_type', 'estimation')})")
                 run_job(job)
                 print(f"[worker] finished job {job['id']}")
             else:
                 time.sleep(POLL_INTERVAL)
-        except KeyboardInterrupt:
-            print(f"\nWorker {WORKER_ID} shutting down.")
-            db.upsert("workers", {
-                "id": WORKER_ID,
-                "status": "offline",
-                "current_job_id": None,
-                "last_heartbeat": datetime.now(timezone.utc).isoformat(),
-            }, on_conflict="id")
-            break
         except Exception as e:
             print(f"[worker] error in poll loop: {e}", file=sys.stderr)
             time.sleep(POLL_INTERVAL)
+
+    db.close()
 
 
 if __name__ == "__main__":
