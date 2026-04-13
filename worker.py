@@ -370,8 +370,18 @@ def _run_estimation_job(job):
                     selected_trades_raw = json.loads(selected_trades_raw)
                 except (json.JSONDecodeError, TypeError):
                     selected_trades_raw = []
-            if trade == "general_contractor" and not selected_trades_raw:
-                selected_trades = "all trades (general contractor mode)"
+            if trade == "general_contractor":
+                if selected_trades_raw:
+                    base = ", ".join(selected_trades_raw)
+                    selected_trades = (
+                        f"ALL trades found in the documents. The user selected these trades as primary scope: {base}. "
+                        f"However, do NOT limit your estimate to only these trades — also estimate any additional "
+                        f"trades you find in the documents (e.g. doors & hardware, storefront & glazing, ceiling systems, "
+                        f"specialties, signage & graphics, millwork & fixture installation, general conditions). "
+                        f"Missing a trade is worse than including one that turns out to be unnecessary."
+                    )
+                else:
+                    selected_trades = "all trades (general contractor mode)"
             elif selected_trades_raw:
                 selected_trades = ", ".join(selected_trades_raw)
             else:
@@ -407,6 +417,8 @@ def _run_estimation_job(job):
             "IMPORTANT: This is a daemon/automated run. Do NOT ask clarifying questions. Do NOT wait for user input. Proceed with your best judgment on all ambiguities. State your assumptions in the output.",
             "",
             "MARKUP NOTE: Line items must be DIRECT COSTS only (no markup baked in). The frontend applies markups separately. But DO include your recommended markup percentages (contingency, overhead, profit) in the output summary so the user has a starting point.",
+            "",
+            "PRICING NOTE: Use the WebSearch tool to look up current material pricing for this region. Do not rely solely on internal knowledge — search for real vendor pricing (Home Depot Pro, Ferguson, Grainger, RS Means, etc.) for the project's ZIP code. Every major equipment item (RTU, panels, fixtures) should have a web-sourced price.",
             "",
             f"Worker directory: {os.path.dirname(os.path.realpath(__file__))}",
         ]

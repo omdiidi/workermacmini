@@ -135,6 +135,11 @@ Workers do NOT run the reaper. On startup, each worker requeues only its own stu
 - Claude runs `/plan2bid:run` → reads docs, extracts items, prices materials, estimates labor
 - `/plan2bid:save-to-db` writes results → sets `projects.status = "completed"`
 
+**Quality controls:**
+- GC mode prompt explicitly lists gap trades to check for (doors, storefront, signage, ceilings, specialties, millwork, general conditions)
+- Prompt instructs Claude to use WebSearch for real-time vendor pricing
+- Line items are direct costs only — frontend applies markups separately
+
 ### Scenario jobs (what-if re-pricing)
 - Fetches the base estimate data from `material_items`/`labor_items` tables, merges into flat `line_items` format with `is_material`/`is_labor` flags
 - Includes project context (location, facility type, trades) in the prompt

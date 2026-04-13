@@ -28,6 +28,12 @@ Workers are **stateless pollers**. Each worker:
 - Supabase `estimation_jobs` and `workers` tables created (see README.md for SQL)
 - Supabase `project-files` Storage bucket created
 
+## Estimation Quality
+
+- **Trade coverage**: GC mode estimates ALL trades found in documents, not just the 14 base trades. The worker prompt explicitly instructs Claude to discover additional trades (doors, storefront, signage, ceiling systems, specialties, millwork, general conditions).
+- **Web pricing**: The worker prompt instructs Claude to use WebSearch for real-time vendor pricing. Estimates should include vendor-specific prices, not just internal knowledge.
+- **Direct costs only**: Line items are direct costs. The frontend applies markups (overhead, profit, contingency) separately.
+
 ## Quick Setup
 
 When asked to "set up this worker", run the setup script:
