@@ -2,8 +2,16 @@
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 
 import supabase_client as db
+
+
+def _safe_list(val):
+    """Ensure val is a list of dicts. LLM sometimes outputs strings instead."""
+    if not isinstance(val, list):
+        return []
+    return [x for x in val if isinstance(x, dict)]
 
 
 def write_estimation_to_db(project_id, output):
@@ -24,7 +32,7 @@ def write_estimation_to_db(project_id, output):
 def _write_estimation_to_db_inner(project_id, output):
     trades_seen = set()
 
-    all_items = output.get("line_items", [])
+    all_items = _safe_list(output.get("line_items", []))
     if not all_items:
         raise RuntimeError(
             "No line_items array found in estimate_output.json. "
@@ -120,7 +128,7 @@ def _write_estimation_to_db_inner(project_id, output):
 
         # 7. anomaly_flags — map to exact DB columns
         db.delete("anomaly_flags", project_id=project_id, trade=trade)
-        trade_anomalies = [a for a in output.get("anomalies", []) if a.get("trade") == trade]
+        trade_anomalies = [a for a in _safe_list(output.get("anomalies", [])) if a.get("trade") == trade]
         if trade_anomalies:
             mapped_anomalies = [{
                 "project_id": project_id,
@@ -128,25 +136,29 @@ def _write_estimation_to_db_inner(project_id, output):
                 "anomaly_type": a.get("anomaly_type", "noted"),
                 "category": a.get("category", ""),
                 "description": a.get("description", ""),
-                "affected_items": [str(i) for i in a.get("affected_items", [])],
+                "affected_items": [str(i) for i in (a.get("affected_items") if isinstance(a.get("affected_items"), list) else [])],
                 "cost_impact": float(a.get("cost_impact", 0) or 0),
             } for a in trade_anomalies]
             db.post("anomaly_flags", mapped_anomalies)
 
     # 8. site_intelligence — wrap in expected JSONB columns
     site_intel = output.get("site_intelligence")
-    if site_intel:
+    if isinstance(site_intel, str):
+        site_intel = {"project_findings": site_intel}
+    if isinstance(site_intel, dict):
         db.upsert("site_intelligence", {
             "project_id": project_id,
             "item_annotations": site_intel.get("item_annotations", {}),
-            "project_findings": site_intel.get("project_findings", site_intel),
+            "project_findings": site_intel.get("project_findings", {}),
             "procurement_intel": site_intel.get("procurement_intel", {}),
             "estimation_guidance": site_intel.get("estimation_guidance", {}),
         }, on_conflict="project_id")
 
     # 9. project_briefs — wrap in expected columns
     brief = output.get("brief_data")
-    if brief:
+    if isinstance(brief, str):
+        brief = {"key_findings": brief}
+    if isinstance(brief, dict):
         db.upsert("project_briefs", {
             "project_id": project_id,
             "project_classification": brief.get("project_classification", ""),
@@ -164,7 +176,7 @@ def _write_estimation_to_db_inner(project_id, output):
         "project_id": project_id,
         "summary_data": {
             "trades_processed": list(trades_seen),
-            "total_line_items": len(output.get("line_items", [])),
+            "total_line_items": len(all_items),
             "warnings": output.get("warnings", []),
         },
     }, on_conflict="project_id")
@@ -172,7 +184,6 @@ def _write_estimation_to_db_inner(project_id, output):
     # 11. Update project total + warnings
     # Materials: trust LLM's extended_cost (may reflect volume discounts)
     # Labor: always derive from hours * rate (prevents material-cost duplication bug)
-    all_items = output.get("line_items", [])
     mat_total = 0.0
     for li in all_items:
         if li.get("is_material"):
@@ -194,7 +205,14 @@ def _write_estimation_to_db_inner(project_id, output):
                 lab_total += float(li.get("cost_expected") if li.get("cost_expected") is not None else li.get("labor_cost", 0) or 0)
     total_estimate = mat_total + lab_total
 
-    update_data = {"total_estimate": total_estimate, "status": "completed"}
+    update_data = {
+        "total_estimate": total_estimate,
+        "status": "completed",
+        "stage": "completed",
+        "progress": 100,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "error_message": None,
+    }
     db.patch("projects", update_data, id=project_id)
 
     return {

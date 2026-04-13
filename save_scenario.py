@@ -1,8 +1,16 @@
 """Save scenario results JSON to Supabase scenario mirror tables."""
 import argparse
 import json
+from datetime import datetime, timezone
 
 import supabase_client as db
+
+
+def _safe_list(val):
+    """Ensure val is a list of dicts. LLM sometimes outputs strings instead."""
+    if not isinstance(val, list):
+        return []
+    return [x for x in val if isinstance(x, dict)]
 
 
 def write_scenario_to_db(scenario_id, project_id, output):
@@ -22,8 +30,10 @@ def write_scenario_to_db(scenario_id, project_id, output):
 
 def _write_scenario_to_db_inner(scenario_id, project_id, output):
     """Decompose scenario agent output into scenario mirror tables."""
+    all_items = _safe_list(output.get("line_items", []))
+
     items_by_trade = {}
-    for li in output.get("line_items", []):
+    for li in all_items:
         trade = li.get("trade", "Unknown")
         items_by_trade.setdefault(trade, []).append(li)
 
@@ -89,7 +99,7 @@ def _write_scenario_to_db_inner(scenario_id, project_id, output):
 
         # 5. scenario_anomaly_flags — map to exact DB columns
         db.delete("scenario_anomaly_flags", scenario_id=scenario_id, trade=trade)
-        trade_anomalies = [a for a in output.get("anomalies", []) if a.get("trade") == trade]
+        trade_anomalies = [a for a in _safe_list(output.get("anomalies", [])) if a.get("trade") == trade]
         if trade_anomalies:
             mapped_anomalies = [{
                 "scenario_id": scenario_id,
@@ -98,7 +108,7 @@ def _write_scenario_to_db_inner(scenario_id, project_id, output):
                 "anomaly_type": a.get("anomaly_type", "noted"),
                 "category": a.get("category", ""),
                 "description": a.get("description", ""),
-                "affected_items": [str(i) for i in a.get("affected_items", [])],
+                "affected_items": [str(i) for i in (a.get("affected_items") if isinstance(a.get("affected_items"), list) else [])],
                 "cost_impact": float(a.get("cost_impact", 0) or 0),
             } for a in trade_anomalies]
             db.post("scenario_anomaly_flags", mapped_anomalies)
@@ -109,13 +119,15 @@ def _write_scenario_to_db_inner(scenario_id, project_id, output):
         "progress": 100,
         "summary": output.get("summary"),
         "reasoning": output.get("reasoning"),
+        "error_message": None,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
     }, id=scenario_id)
 
     return {
         "scenario_id": scenario_id,
         "project_id": project_id,
         "trades": list(items_by_trade.keys()),
-        "total_line_items": len(output.get("line_items", [])),
+        "total_line_items": len(all_items),
     }
 
 
