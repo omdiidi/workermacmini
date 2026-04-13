@@ -49,16 +49,23 @@ def write_estimation_to_db(project_id, output):
         if material_rows:
             db.post("material_items", material_rows)
 
-        # 4. material_metadata
+        # 4. material_metadata — trust LLM's extended costs (may include volume discounts)
         mat_items = [li for li in items if li.get("is_material")]
-        mat_total = sum(float(li.get("extended_cost_expected", 0) or 0) for li in mat_items)
+        def _mat_ext(li, field_ext, field_uc):
+            val = float(li.get(field_ext, 0) or 0)
+            if val > 0:
+                return val
+            qty = float(li.get("quantity", 0) or 0)
+            uc = float(li.get(field_uc, 0) or 0)
+            return round(qty * uc, 2)
+        mat_total = sum(_mat_ext(li, "extended_cost_expected", "unit_cost_expected") for li in mat_items)
         db.upsert("material_metadata", {
             "project_id": project_id,
             "trade": trade,
             "total_material_cost": mat_total,
-            "total_cost_low": sum(float(li.get("extended_cost_low", 0) or 0) for li in mat_items),
+            "total_cost_low": sum(_mat_ext(li, "extended_cost_low", "unit_cost_low") for li in mat_items),
             "total_cost_expected": mat_total,
-            "total_cost_high": sum(float(li.get("extended_cost_high", 0) or 0) for li in mat_items),
+            "total_cost_high": sum(_mat_ext(li, "extended_cost_high", "unit_cost_high") for li in mat_items),
             "items_high_confidence": sum(1 for i in mat_items if (i.get("material_confidence") or i.get("confidence")) == "high"),
             "items_medium_confidence": sum(1 for i in mat_items if (i.get("material_confidence") or i.get("confidence")) == "medium"),
             "items_low_confidence": sum(1 for i in mat_items if (i.get("material_confidence") or i.get("confidence")) == "low"),
@@ -70,9 +77,13 @@ def write_estimation_to_db(project_id, output):
         if labor_rows:
             db.post("labor_items", labor_rows)
 
-        # 6. labor_metadata
+        # 6. labor_metadata — derive from hours * rate
         lab_items = [li for li in items if li.get("is_labor")]
-        lab_total = sum(float(li.get("cost_expected") if li.get("cost_expected") is not None else li.get("labor_cost", 0) or 0) for li in lab_items)
+        def _lab_cost(li, field_hrs, field_cost):
+            hrs = float(li.get(field_hrs, 0) or 0)
+            rate = float(li.get("blended_hourly_rate", 0) or 0)
+            return round(hrs * rate, 2) if (hrs > 0 and rate > 0) else float(li.get(field_cost, 0) or 0)
+        lab_total = sum(_lab_cost(li, "total_labor_hours", "cost_expected") for li in lab_items)
         db.upsert("labor_metadata", {
             "project_id": project_id,
             "trade": trade,
@@ -81,9 +92,9 @@ def write_estimation_to_db(project_id, output):
             "total_hours_low": sum(float(li.get("hours_low", 0) or 0) for li in lab_items),
             "total_hours_expected": sum(float(li.get("hours_expected", 0) or 0) for li in lab_items),
             "total_hours_high": sum(float(li.get("hours_high", 0) or 0) for li in lab_items),
-            "total_cost_low": sum(float(li.get("cost_low", 0) or 0) for li in lab_items),
+            "total_cost_low": sum(_lab_cost(li, "hours_low", "cost_low") for li in lab_items),
             "total_cost_expected": lab_total,
-            "total_cost_high": sum(float(li.get("cost_high", 0) or 0) for li in lab_items),
+            "total_cost_high": sum(_lab_cost(li, "hours_high", "cost_high") for li in lab_items),
             "bls_area_used": output.get("bls_area_used") or "",
             "bls_wage_data": output.get("bls_wage_rates") or {},
             "items_high_confidence": sum(1 for i in lab_items if (i.get("labor_confidence") or i.get("confidence")) == "high"),
@@ -143,9 +154,28 @@ def write_estimation_to_db(project_id, output):
     }, on_conflict="project_id")
 
     # 11. Update project total + warnings
+    # Materials: trust LLM's extended_cost (may reflect volume discounts)
+    # Labor: always derive from hours * rate (prevents material-cost duplication bug)
     all_items = output.get("line_items", [])
-    mat_total = sum(float(li.get("extended_cost_expected", 0) or 0) for li in all_items if li.get("is_material"))
-    lab_total = sum(float(li.get("cost_expected") if li.get("cost_expected") is not None else li.get("labor_cost", 0) or 0) for li in all_items if li.get("is_labor"))
+    mat_total = 0.0
+    for li in all_items:
+        if li.get("is_material"):
+            ext = float(li.get("extended_cost_expected", 0) or 0)
+            if ext > 0:
+                mat_total += ext
+            else:
+                qty = float(li.get("quantity", 0) or 0)
+                uc = float(li.get("unit_cost_expected", 0) or 0)
+                mat_total += round(qty * uc, 2)
+    lab_total = 0.0
+    for li in all_items:
+        if li.get("is_labor"):
+            hrs = float(li.get("total_labor_hours", 0) or 0)
+            rate = float(li.get("blended_hourly_rate", 0) or 0)
+            if hrs > 0 and rate > 0:
+                lab_total += round(hrs * rate, 2)
+            else:
+                lab_total += float(li.get("cost_expected") if li.get("cost_expected") is not None else li.get("labor_cost", 0) or 0)
     total_estimate = mat_total + lab_total
 
     update_data = {"total_estimate": total_estimate, "status": "completed"}
@@ -183,19 +213,31 @@ def _to_extraction_row(project_id, li):
 
 
 def _to_material_row(project_id, li):
+    qty = float(li.get("quantity", 0) or 0)
+    uc_low = float(li.get("unit_cost_low", 0) or 0)
+    uc_exp = float(li.get("unit_cost_expected", 0) or 0)
+    uc_high = float(li.get("unit_cost_high", 0) or 0)
+
+    # Use the LLM's extended_cost if provided — it may reflect volume discounts,
+    # negotiated pricing, or package deals that differ from simple qty * unit_cost.
+    # Only fall back to multiplication when extended_cost is missing.
+    ext_exp = float(li.get("extended_cost_expected", 0) or 0) or round(qty * uc_exp, 2)
+    ext_low = float(li.get("extended_cost_low", 0) or 0) or round(qty * uc_low, 2)
+    ext_high = float(li.get("extended_cost_high", 0) or 0) or round(qty * uc_high, 2)
+
     return {
         "project_id": project_id,
         "item_id": li.get("item_id") or "",
         "trade": li.get("trade") or "",
         "description": li.get("description") or "",
-        "quantity": float(li.get("quantity", 0) or 0),
+        "quantity": qty,
         "unit": li.get("unit") or "",
-        "unit_cost_low": float(li.get("unit_cost_low", 0) or 0),
-        "unit_cost_expected": float(li.get("unit_cost_expected", 0) or 0),
-        "unit_cost_high": float(li.get("unit_cost_high", 0) or 0),
-        "extended_cost_low": float(li.get("extended_cost_low", 0) or 0),
-        "extended_cost_expected": float(li.get("extended_cost_expected", 0) or 0),
-        "extended_cost_high": float(li.get("extended_cost_high", 0) or 0),
+        "unit_cost_low": uc_low,
+        "unit_cost_expected": uc_exp,
+        "unit_cost_high": uc_high,
+        "extended_cost_low": ext_low,
+        "extended_cost_expected": ext_exp,
+        "extended_cost_high": ext_high,
         "confidence": li.get("material_confidence") or li.get("confidence") or "medium",
         "price_sources": li.get("price_sources", []),
         "pricing_method": li.get("pricing_method") or "",
@@ -209,6 +251,18 @@ def _to_material_row(project_id, li):
 
 
 def _to_labor_row(project_id, li):
+    hours = float(li.get("total_labor_hours", 0) or 0)
+    rate = float(li.get("blended_hourly_rate", 0) or 0)
+    computed_cost = round(hours * rate, 2)
+
+    # Trust hours and rate as the LLM's labor judgment; derive costs from them.
+    # Prevents a known issue where cost_expected gets copied from material costs.
+    hours_low = float(li.get("hours_low", 0) or 0)
+    hours_high = float(li.get("hours_high", 0) or 0)
+    cost_expected = computed_cost if computed_cost > 0 else float(li.get("cost_expected", 0) or 0)
+    cost_low = round(hours_low * rate, 2) if (hours_low > 0 and rate > 0) else float(li.get("cost_low", 0) or 0)
+    cost_high = round(hours_high * rate, 2) if (hours_high > 0 and rate > 0) else float(li.get("cost_high", 0) or 0)
+
     return {
         "project_id": project_id,
         "item_id": li.get("item_id") or "",
@@ -217,15 +271,15 @@ def _to_labor_row(project_id, li):
         "quantity": float(li.get("quantity", 0) or 0),
         "unit": li.get("unit") or "",
         "crew": li.get("crew", []),
-        "total_labor_hours": float(li.get("total_labor_hours", 0) or 0),
-        "blended_hourly_rate": float(li.get("blended_hourly_rate", 0) or 0),
-        "labor_cost": float(li.get("labor_cost", 0) or 0),
-        "hours_low": float(li.get("hours_low", 0) or 0),
+        "total_labor_hours": hours,
+        "blended_hourly_rate": rate,
+        "labor_cost": computed_cost if computed_cost > 0 else float(li.get("labor_cost", 0) or 0),
+        "hours_low": hours_low,
         "hours_expected": float(li.get("hours_expected", 0) or 0),
-        "hours_high": float(li.get("hours_high", 0) or 0),
-        "cost_low": float(li.get("cost_low", 0) or 0),
-        "cost_expected": float(li.get("cost_expected", 0) or 0),
-        "cost_high": float(li.get("cost_high", 0) or 0),
+        "hours_high": hours_high,
+        "cost_low": cost_low,
+        "cost_expected": cost_expected,
+        "cost_high": cost_high,
         "confidence": li.get("labor_confidence") or li.get("confidence") or "medium",
         "reasoning_notes": li.get("labor_reasoning") or li.get("reasoning_notes") or "",
         "site_adjustments": li.get("site_adjustments", []),
