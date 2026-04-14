@@ -355,9 +355,10 @@ Estimate ONLY these trades: {trade_list}{find_additional}
 2. For each assigned trade, extract every item with quantities from the drawings
 3. Use WebSearch to price major equipment and materials for {project.get('city', '')}, {project.get('state', '')} {project.get('zip_code', '')}. Minimum 5 web searches.
 4. Price using these approaches:
-   - Fixtures/equipment (RTUs, panels, water closets): FURNISHED AND INSTALLED price. is_material=true, is_labor=false.
-   - Bulk materials (wire, pipe, drywall, tile): separate material and labor items.
+   - Fixtures/equipment (RTUs, panels, water closets): price at furnished-and-installed cost (is_material=true, is_labor=false). Where possible, also create a separate labor item for the installation hours.
+   - Bulk materials (wire, pipe, drywall, tile): ALWAYS create separate material and labor items.
    - Lump-sum (demo, permits): is_labor=true, single LS price.
+   - TENANT-SUPPLIED ITEMS: If drawings show items as "tenant-supplied", "by owner", or "GC install only" (e.g. retail fixtures, millwork, displays, monitors, LED walls, signage), do NOT price the material. Price ONLY the receiving, storage, and installation LABOR (is_material=false, is_labor=true). The tenant ships these at their own cost.
 5. Write trade_items.json with this schema:
 
 {{
