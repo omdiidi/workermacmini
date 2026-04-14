@@ -17,7 +17,7 @@ import supabase_client as db
 def _parse_args():
     import argparse
     parser = argparse.ArgumentParser(description="Plan2Bid worker daemon")
-    parser.add_argument("--instance", type=int, default=1, choices=[1, 2, 3], help="Instance number (1-3) for multi-worker setups")
+    parser.add_argument("--instance", type=int, default=1, choices=[1, 2, 3, 4, 5], help="Instance number (1-5) for multi-worker setups")
     parser.add_argument("--role", choices=["primary", "secondary"], default=None, help="Machine role (primary=5s poll, secondary=15s poll)")
     parser.add_argument("--poll-interval", type=int, default=None, help="Custom poll interval in seconds (overrides --role)")
     args, _ = parser.parse_known_args()
@@ -39,6 +39,43 @@ RESULT_COMPLETED = "completed"
 RESULT_ERROR = "error"
 RESULT_TIMEOUT = "timeout"
 RESULT_SHUTDOWN = "shutdown"
+
+# Multi-terminal trade grouping
+MEP_TRADES = {"electrical", "plumbing", "hvac", "fire_protection", "low_voltage"}
+ARCH_TRADES = {"framing", "drywall", "flooring", "painting", "roofing",
+               "ceiling_systems", "doors_hardware"}
+GC_TRADES = {"demolition", "concrete", "structural_steel", "storefront_glazing",
+             "signage_graphics", "specialties", "millwork", "general_conditions", "landscaping"}
+GROUP_TIMEOUT = 2400  # 40 minutes per group terminal
+
+
+def _group_trades(selected_trades, trade):
+    """Group trades for multi-terminal estimation."""
+    trades = set(selected_trades) if selected_trades else set()
+    is_gc = trade == "general_contractor"
+
+    if len(trades) <= 4 and not is_gc:
+        return [{"name": "all", "trades": list(trades), "find_additional": False}]
+
+    groups = []
+    mep = trades & MEP_TRADES
+    arch = trades & ARCH_TRADES
+    gc = trades & GC_TRADES
+    ungrouped = trades - MEP_TRADES - ARCH_TRADES - GC_TRADES
+
+    if mep:
+        groups.append({"name": "mep", "trades": sorted(mep), "find_additional": False})
+    if arch:
+        groups.append({"name": "arch", "trades": sorted(arch), "find_additional": False})
+
+    gc_trades_list = sorted(gc | ungrouped)
+    groups.append({"name": "gc", "trades": gc_trades_list, "find_additional": is_gc})
+
+    if len(groups) <= 1:
+        return [{"name": "all", "trades": list(trades), "find_additional": is_gc}]
+
+    return groups
+
 
 _current_job_id = None
 _shutdown_requested = False
@@ -192,6 +229,294 @@ def _cleanup_session_data(cwd):
                     print(f"[cleanup] Removed session-env: {entry}")
             except OSError:
                 pass
+
+
+def _launch_terminal_window(cwd):
+    """Launch a Claude Code Terminal window without polling. Returns window_id or None."""
+    _ensure_directory_trusted(cwd)
+
+    runner = os.path.join(cwd, "_run.sh")
+    os.chmod(runner, 0o755)
+
+    result = subprocess.run([
+        "osascript", "-e", f'''
+            tell application "Terminal"
+                set t to do script "bash \\"{runner}\\"; exit 0"
+                return id of window 1 whose tabs contains t
+            end tell
+        '''
+    ], capture_output=True, text=True, timeout=10)
+
+    if result.returncode != 0 or not result.stdout.strip().isdigit():
+        print(f"[multi] osascript launch failed: {result.stderr.strip()}")
+        return None
+    window_id = int(result.stdout.strip())
+    print(f"[multi] Terminal launched (window {window_id})")
+    return window_id
+
+
+def _poll_for_file(filepath, timeout=GROUP_TIMEOUT, poll_interval=15):
+    """Poll for a file to appear and contain valid JSON."""
+    start = time.time()
+    while time.time() - start < timeout:
+        if _shutdown_requested:
+            return False
+        if os.path.exists(filepath):
+            try:
+                size1 = os.path.getsize(filepath)
+                time.sleep(5)
+                size2 = os.path.getsize(filepath)
+                if size1 == size2 and size1 > 0:
+                    with open(filepath) as f:
+                        json.load(f)
+                    return True
+            except (json.JSONDecodeError, OSError):
+                pass
+        time.sleep(poll_interval)
+    return False
+
+
+def _write_prompt_and_script(group_dir, prompt, tmpdir):
+    """Write _prompt.txt and _run.sh to a group subdirectory."""
+    real_group = os.path.realpath(group_dir)
+    real_tmpdir = os.path.realpath(tmpdir)
+    worker_dir = os.path.dirname(os.path.realpath(__file__))
+
+    prompt_path = os.path.join(group_dir, "_prompt.txt")
+    with open(prompt_path, "w") as f:
+        f.write(prompt)
+
+    runner = os.path.join(group_dir, "_run.sh")
+    with open(runner, "w") as f:
+        f.write(f'''#!/bin/bash
+export WORKER_DIR="{worker_dir}"
+cd "{real_group}"
+# Link documents from parent directory
+for doc in "{real_tmpdir}"/*.pdf "{real_tmpdir}"/*.zip "{real_tmpdir}"/*.PDF; do
+    [ -f "$doc" ] && ln -sf "$doc" . 2>/dev/null
+done
+# Also link any extracted files (not starting with _ or .)
+for doc in "{real_tmpdir}"/*; do
+    base=$(basename "$doc")
+    case "$base" in _*|.*|group_*|merge) continue;; esac
+    [ -f "$doc" ] && ln -sf "$doc" . 2>/dev/null
+done
+claude --dangerously-skip-permissions "$(cat _prompt.txt)"
+''')
+    os.chmod(runner, 0o755)
+
+
+def _write_window_id(group_dir, window_id):
+    """Write window_id for cleanup."""
+    with open(os.path.join(group_dir, "_window_id.txt"), "w") as f:
+        f.write(str(window_id))
+
+
+def _read_window_ids(tmpdir):
+    """Read all window IDs from group subdirectories for cleanup."""
+    ids = []
+    for entry in os.listdir(tmpdir):
+        wid_path = os.path.join(tmpdir, entry, "_window_id.txt")
+        if os.path.exists(wid_path):
+            try:
+                with open(wid_path) as f:
+                    ids.append(int(f.read().strip()))
+            except (ValueError, OSError):
+                pass
+    return ids
+
+
+def _build_group_prompt(project, group):
+    """Build inline estimation prompt for a group terminal."""
+    trade_list = ", ".join(group["trades"]) if group["trades"] else "all trades found in documents"
+    find_additional = ""
+    if group["find_additional"]:
+        find_additional = (
+            "\n\nIMPORTANT: Also estimate ANY additional trades you find in the documents beyond the ones listed above. "
+            "Common trades to check for: doors & hardware, storefront & glazing, ceiling systems, "
+            "specialties & accessories, signage & graphics, millwork & fixture installation, general conditions. "
+            "Missing a trade is worse than including one that turns out unnecessary."
+        )
+
+    return f"""You are a senior construction estimator. Read all documents and estimate the assigned trades. Use WebSearch for pricing.
+
+=== PROJECT ===
+Project Name: {project.get('project_name', '')}
+Facility Type: {project.get('facility_type', '')}
+Project Type: {project.get('project_type', '')}
+Location: {project.get('city', '')}, {project.get('state', '')} {project.get('zip_code', '')}
+Square Footage: {project.get('square_footage', 'Unknown')}
+
+=== YOUR ASSIGNED TRADES ===
+Estimate ONLY these trades: {trade_list}{find_additional}
+
+=== INSTRUCTIONS ===
+1. Read ALL document pages using the Read tool (batch in 20-page calls)
+2. For each assigned trade, extract every item with quantities from the drawings
+3. Use WebSearch to price major equipment and materials for {project.get('city', '')}, {project.get('state', '')} {project.get('zip_code', '')}. Minimum 5 web searches.
+4. Price using these approaches:
+   - Fixtures/equipment (RTUs, panels, water closets): FURNISHED AND INSTALLED price. is_material=true, is_labor=false.
+   - Bulk materials (wire, pipe, drywall, tile): separate material and labor items.
+   - Lump-sum (demo, permits): is_labor=true, single LS price.
+5. Write trade_items.json with this schema:
+
+{{
+  "line_items": [
+    {{
+      "item_id": "TRADE-NNN",
+      "trade": "trade_name",
+      "description": "detailed description",
+      "quantity": 0,
+      "unit": "EA",
+      "is_material": true,
+      "is_labor": false,
+      "unit_cost_low": 0, "unit_cost_expected": 0, "unit_cost_high": 0,
+      "extended_cost_low": 0, "extended_cost_expected": 0, "extended_cost_high": 0,
+      "confidence": "medium",
+      "pricing_method": "web_search",
+      "pricing_notes": "",
+      "price_sources": [{{"source_name": "", "url": ""}}],
+      "source_refs": [{{"doc_filename": "", "page_number": 0}}],
+      "model_number": "", "manufacturer": "",
+      "total_labor_hours": 0, "blended_hourly_rate": 0, "labor_cost": 0,
+      "hours_low": 0, "hours_expected": 0, "hours_high": 0,
+      "cost_low": 0, "cost_expected": 0, "cost_high": 0,
+      "reasoning_notes": "",
+      "crew": [{{"role": "", "count": 1}}]
+    }}
+  ]
+}}
+
+RULES:
+- line_items is a FLAT array
+- Each item has is_material AND is_labor booleans
+- Each item_id is unique (TRADE-NNN format)
+- All costs are numbers, not strings
+- confidence: "high", "medium", or "low"
+- Line items are DIRECT COSTS only (no markup)
+
+Write trade_items.json to the current directory. Do NOT run /plan2bid:save-to-db. Just write the JSON and stop.
+
+Project Description:
+{project.get('project_description', '')}
+
+Documents are in the current directory. Ignore _prompt.txt and _run.sh.
+This is an automated run. Do NOT ask questions. Proceed with best judgment."""
+
+
+def _build_merge_prompt(project, group_dirs, completed, total):
+    """Build merge prompt that assembles group results and saves to DB."""
+    project_id = project.get("id", "")
+    paths = []
+    for group, group_dir in group_dirs:
+        real_path = os.path.realpath(os.path.join(group_dir, "trade_items.json"))
+        if os.path.exists(real_path):
+            paths.append(f"- {real_path} ({group['name']} group: {', '.join(group['trades'])})")
+
+    paths_str = "\n".join(paths)
+    missing_note = ""
+    if completed < total:
+        missing_note = f"\n\nWARNING: Only {completed}/{total} groups completed. Check for missing trades and estimate them yourself if needed."
+
+    return f"""You are assembling a construction estimate from multiple trade group results.
+
+=== PROJECT ===
+Project ID: {project_id}
+Project Name: {project.get('project_name', '')}
+Facility Type: {project.get('facility_type', '')}
+Location: {project.get('city', '')}, {project.get('state', '')} {project.get('zip_code', '')}
+
+=== TRADE GROUP FILES ===
+{paths_str}{missing_note}
+
+=== INSTRUCTIONS ===
+1. Read each trade_items.json file listed above
+2. Merge all line_items into a single array
+3. Deduplicate: if same item_id appears in multiple groups, keep the more detailed one
+4. Validate:
+   - Total $/SF should be $150-400 for retail renovation. Below $150 means missing scope.
+   - Labor should be 35-55% of total direct costs
+   - Every major trade should have at least 2 line items
+   - No items with $0 cost
+   - Check for standard GC items: supervision, permits, dumpster, barricade, cleaning, closeout
+5. Write estimate_output.json to the current directory (./estimate_output.json):
+
+{{
+  "line_items": [ ...all merged items... ],
+  "anomalies": [],
+  "site_intelligence": {{"project_findings": {{}}, "procurement_intel": {{}}, "estimation_guidance": {{}}}},
+  "brief_data": {{"project_classification": "", "scope_summary": "", "generation_notes": "Multi-terminal estimation: {completed}/{total} groups completed"}},
+  "warnings": []
+}}
+
+6. After writing estimate_output.json, run: /plan2bid:save-to-db {project_id}
+
+The estimation is NOT complete until save-to-db succeeds. Do NOT stop before saving."""
+
+
+def _run_estimation_multi_terminal(job, project, tmpdir, groups):
+    """Run estimation across multiple Terminal windows, then merge results."""
+    project_id = project.get("id", "")
+    job_id = job["id"]
+    total = len(groups)
+
+    print(f"[multi] Starting multi-terminal estimation: {total} groups")
+    db.patch("projects", {"status": "running", "stage": "estimation", "progress": 15,
+                          "message": f"Estimating {total} trade groups in parallel..."}, id=project_id)
+
+    group_dirs = []
+    for group in groups:
+        group_dir = os.path.join(tmpdir, f"group_{group['name']}")
+        os.makedirs(group_dir, exist_ok=True)
+
+        prompt = _build_group_prompt(project, group)
+        _write_prompt_and_script(group_dir, prompt, tmpdir)
+
+        window_id = _launch_terminal_window(group_dir)
+        if window_id is not None:
+            _write_window_id(group_dir, window_id)
+
+        group_dirs.append((group, group_dir))
+        print(f"[multi] Launched group '{group['name']}': {', '.join(group['trades'])}")
+        time.sleep(2)
+
+    db.patch("projects", {"progress": 25, "message": f"Waiting for {total} trade groups..."}, id=project_id)
+
+    completed = 0
+    for group, group_dir in group_dirs:
+        result_file = os.path.join(group_dir, "trade_items.json")
+        ok = _poll_for_file(result_file)
+        if ok:
+            completed += 1
+            progress = 25 + int((completed / total) * 45)
+            db.patch("projects", {
+                "progress": progress,
+                "message": f"Completed {completed}/{total} trade groups",
+            }, id=project_id)
+            print(f"[multi] Group '{group['name']}' completed ({completed}/{total})")
+        else:
+            print(f"[multi] Group '{group['name']}' did not produce trade_items.json")
+
+    if _shutdown_requested:
+        return RESULT_SHUTDOWN
+
+    for wid in _read_window_ids(tmpdir):
+        _exit_claude_and_close_terminal(wid)
+
+    if completed == 0:
+        print("[multi] No groups completed — failing")
+        return RESULT_ERROR
+
+    print(f"[multi] {completed}/{total} groups completed. Launching merge terminal...")
+    db.patch("projects", {"progress": 70, "message": "Merging trade group results..."}, id=project_id)
+
+    merge_dir = os.path.join(tmpdir, "merge")
+    os.makedirs(merge_dir, exist_ok=True)
+
+    merge_prompt = _build_merge_prompt(project, group_dirs, completed, total)
+    result = _launch_claude_terminal(merge_prompt, merge_dir, status_table="projects", status_id=project_id)
+
+    return result
 
 
 def _launch_claude_terminal(prompt, cwd, status_table, status_id, timeout=JOB_TIMEOUT):
@@ -424,7 +749,16 @@ def _run_estimation_job(job):
         ]
         prompt = "\n".join(prompt_lines)
 
-        result = _launch_claude_terminal(prompt, tmpdir, status_table="projects", status_id=project_id)
+        # Decide: single-pass or multi-terminal
+        groups = _group_trades(selected_trades_raw, trade)
+
+        if len(groups) == 1 and groups[0]["name"] == "all":
+            # Single-pass: current behavior
+            result = _launch_claude_terminal(prompt, tmpdir, status_table="projects", status_id=project_id)
+        else:
+            # Multi-terminal: launch parallel groups + merge
+            proj = project if isinstance(project, dict) else project[0]
+            result = _run_estimation_multi_terminal(job, proj, tmpdir, groups)
 
         if result == RESULT_SHUTDOWN:
             db.patch("estimation_jobs", {
@@ -465,7 +799,15 @@ def _run_estimation_job(job):
         db.patch("projects", {"status": "error", "error_message": str(e)[:200]}, id=project_id)
 
     finally:
+        # Close any orphaned Terminal windows from multi-terminal runs
+        for wid in _read_window_ids(tmpdir):
+            _exit_claude_and_close_terminal(wid)
+        # Clean session data for all subdirectories (group_*, merge)
         _cleanup_session_data(tmpdir)
+        for entry in os.listdir(tmpdir) if os.path.isdir(tmpdir) else []:
+            subdir = os.path.join(tmpdir, entry)
+            if os.path.isdir(subdir) and (entry.startswith("group_") or entry == "merge"):
+                _cleanup_session_data(subdir)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

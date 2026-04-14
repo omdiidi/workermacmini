@@ -20,7 +20,7 @@ usage() {
     echo "Usage: bash setup.sh [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --workers N        Number of worker instances (1-3, default: 1)"
+    echo "  --workers N        Number of worker instances (1-5, default: 1)"
     echo "  --role ROLE        Machine role: primary (5s poll) or secondary (15s poll)"
     echo "  --poll-interval N  Custom poll interval in seconds (overrides --role)"
     echo "  --help             Show this help"
@@ -37,8 +37,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validate ---
-if ! [[ "$NUM_WORKERS" =~ ^[1-3]$ ]]; then
-    echo "Error: --workers must be 1, 2, or 3"
+if ! [[ "$NUM_WORKERS" =~ ^[1-5]$ ]]; then
+    echo "Error: --workers must be 1-5"
     exit 1
 fi
 if ! [[ "$ROLE" =~ ^(primary|secondary)$ ]]; then

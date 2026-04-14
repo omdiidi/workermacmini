@@ -34,6 +34,26 @@ Workers are **stateless pollers**. Each worker:
 - **Web pricing**: The worker prompt instructs Claude to use WebSearch for real-time vendor pricing. Estimates should include vendor-specific prices, not just internal knowledge.
 - **Direct costs only**: Line items are direct costs. The frontend applies markups (overhead, profit, contingency) separately.
 
+## Multi-Terminal Architecture
+
+For GC (general contractor) estimates with 5+ trades, the worker launches multiple parallel Terminal windows instead of one session spawning internal sub-agents. Each window is an independent Claude Code session with full WebSearch access and full document reading.
+
+**How it works:**
+- **1-4 trades**: Single terminal, runs `/plan2bid:run` (current behavior)
+- **5+ trades or GC mode**: 3 group terminals in parallel + 1 merge terminal
+
+**Trade groups:**
+- MEP: electrical, plumbing, hvac, fire_protection, low_voltage
+- Architectural: framing, drywall, flooring, painting, roofing, ceiling_systems, doors_hardware
+- GC/Specialty: demolition, concrete, structural_steel + any additional trades found in documents
+
+Each group terminal reads the actual documents, uses WebSearch for pricing, and writes `trade_items.json`. The merge terminal assembles all group results, validates ($/SF, labor ratio, trade coverage), and saves to the database.
+
+**Why multi-terminal instead of sub-agents:**
+- Sub-agents spawned via the Agent tool can't use WebSearch (0 calls in all worker runs)
+- Sub-agents never see the actual drawings — only scope files on disk
+- Independent Terminal sessions have full tool access including WebSearch (17-31 calls each)
+
 ## Quick Setup
 
 When asked to "set up this worker", run the setup script:

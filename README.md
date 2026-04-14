@@ -140,6 +140,30 @@ Workers do NOT run the reaper. On startup, each worker requeues only its own stu
 - Prompt instructs Claude to use WebSearch for real-time vendor pricing
 - Line items are direct costs only — frontend applies markups separately
 
+### Multi-terminal estimation (GC mode)
+
+For general contractor estimates with 5+ trades, the worker automatically splits work across multiple parallel Terminal windows:
+
+```
+1. Worker claims job, downloads documents
+2. Groups trades: MEP | Architectural | GC/Specialty
+3. Launches 3 Terminal windows in parallel (each reads full documents, uses WebSearch)
+4. Each writes trade_items.json when done
+5. Launches merge Terminal: combines results, validates, saves to DB
+6. Total time: ~20 min (same as single-pass, but with better coverage)
+```
+
+Each group terminal is a full independent Claude Code session — not a sub-agent. This means:
+- Full WebSearch access for real-time pricing
+- Full document reading (not scope summaries on disk)
+- Each group focuses on fewer trades = more detailed line items
+
+Single-trade and small-scope (1-4 trades) estimates use the original single-pass approach.
+
+### Worker instances
+
+Each Mac Mini can run up to **5 worker instances** (`bash setup.sh --workers 5`). Each instance processes one job at a time. A GC job opens at most 4 Terminal windows (3 groups + 1 merge).
+
 ### Scenario jobs (what-if re-pricing)
 - Fetches the base estimate data from `material_items`/`labor_items` tables, merges into flat `line_items` format with `is_material`/`is_labor` flags
 - Includes project context (location, facility type, trades) in the prompt
@@ -194,6 +218,7 @@ plan2bid-worker/
 | 1 Mini, 1 instance   | 1       | ~6                     |
 | 1 Mini, 2 instances  | 2       | ~12                    |
 | 1 Mini, 3 instances  | 3       | ~18                    |
+| 1 Mini, 5 instances  | 5       | ~30                    |
 | 2 Minis, 3 each      | 6       | ~36                    |
 
 **Note:** All instances on the same machine share one Claude Max account. Throughput may be lower than linear if the account hits rate limits under heavy concurrent use.
