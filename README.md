@@ -142,23 +142,35 @@ Workers do NOT run the reaper. On startup, each worker requeues only its own stu
 
 ### Multi-terminal estimation (GC mode)
 
-For general contractor estimates with 5+ trades, the worker automatically splits work across multiple parallel Terminal windows:
+For general contractor estimates with 5+ trades (or any "Run All Trades" submission that populates all 21 canonical trades), the worker automatically splits work across multiple parallel Terminal windows:
 
 ```
-1. Worker claims job, downloads documents
-2. Groups trades: MEP | Architectural | GC/Specialty
-3. Launches 3 Terminal windows in parallel (each reads full documents, uses WebSearch)
-4. Each writes trade_items.json when done
-5. Launches merge Terminal: combines results, validates, saves to DB
-6. Total time: ~20 min (same as single-pass, but with better coverage)
+1. Worker claims job, downloads documents, extracts ZIPs
+2. Groups trades into MEP / Architectural / GC buckets via worker.py:_group_trades
+3. Launches up to 3 Terminal windows in parallel (each reads full documents, uses WebSearch)
+4. Each terminal rasterizes PDFs to ≤1800px PNGs (pdftoppm) then reads PNGs one at a time
+5. Each terminal writes trade_items.json
+6. Launches merge Terminal: reads JSONs, merges, dedupes, validates, saves to DB
+7. Total time: ~20 min (same as single-pass, but with per-trade depth)
 ```
+
+Trade groups live in `MEP_TRADES`, `ARCH_TRADES`, `GC_TRADES` constants in `worker.py:44-48`. Currently 21 trades total:
+- MEP (5): electrical, plumbing, hvac, fire_protection, low_voltage
+- Architectural (7): framing, drywall, flooring, painting, roofing, ceiling_systems, doors_hardware
+- GC/Specialty (9): demolition, concrete, structural_steel, storefront_glazing, signage_graphics, specialties, millwork, general_conditions, landscaping
 
 Each group terminal is a full independent Claude Code session — not a sub-agent. This means:
 - Full WebSearch access for real-time pricing
 - Full document reading (not scope summaries on disk)
 - Each group focuses on fewer trades = more detailed line items
 
-Single-trade and small-scope (1-4 trades) estimates use the original single-pass approach.
+Each group's prompt also includes a **cross-trade coordination category block** scoped to its boundary (MEP looks for mechanical-electrical interfaces + piping interfaces + controls; ARCH looks for structural-finishes interfaces + ceiling system layers + consumables; GC looks for fire-life-safety + barricades + permits + accessory items). Defined in `COORDINATION_CATEGORIES` at worker.py top-level. This catches items that historically fell between trade buckets.
+
+Single-trade and small-scope (1-4 trades) estimates use the original single-pass `/plan2bid:run` approach.
+
+### PDF handling (2000px ceiling)
+
+Anthropic's API enforces a 2000px per-image dimension cap once a conversation accumulates more than 20 images. Claude Code's `Read` tool on raw PDFs renders each page to an image at a DPI that produces >2000px on construction drawings — tripping the cap retroactively and making the session unrecoverable. Every worker-launched terminal (group + merge + single-pass) rasterizes PDFs to ≤1800px PNGs via `pdftoppm -scale-to 1800` up front, then reads the PNGs one at a time. Safe regardless of drawing sheet size.
 
 ### Worker instances
 
