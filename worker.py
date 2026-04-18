@@ -351,7 +351,8 @@ Square Footage: {project.get('square_footage', 'Unknown')}
 Estimate ONLY these trades: {trade_list}{find_additional}
 
 === INSTRUCTIONS ===
-1. Read ALL document pages using the Read tool (batch in 20-page calls)
+1a. Rasterize all PDFs first: mkdir -p analysis/pages && find . -maxdepth 1 -type f \( -iname '*.pdf' \) -print0 | while IFS= read -r -d '' pdf; do stem=$(basename "$pdf"); stem="${{stem%.*}}"; mkdir -p "analysis/pages/${{stem}}"; pdftoppm -scale-to 1800 "$pdf" "analysis/pages/${{stem}}/page" -png; done
+1b. Read the rasterized PNGs one at a time (Claude Code's Read on raw PDFs exceeds the Anthropic 2000px many-image ceiling and breaks the session). Batch findings into analysis/batch_NNN.md every ~18 PNGs.
 2. For each assigned trade, extract every item with quantities from the drawings
 3. Use WebSearch to price major equipment and materials for {project.get('city', '')}, {project.get('state', '')} {project.get('zip_code', '')}. Minimum 5 web searches.
 4. Price using these approaches:
@@ -601,24 +602,47 @@ claude --dangerously-skip-permissions "$(cat _prompt.txt)"
         except Exception as e:
             print(f"[claude] DB poll error (will retry): {e}", file=sys.stderr)
 
-        # File-based stall detection
-        estimate_file = os.path.join(cwd, "estimate_output.json")
-        if os.path.exists(estimate_file):
-            elapsed = int(time.time() - start)
-            print(f"[claude] estimate_output.json exists at {elapsed}s — waiting for save-to-db")
-
-        # Activity watchdog — warn if no project file activity for 10 minutes
+        # Activity watchdog — hard-fail on prolonged stalls.
+        # Two failure modes:
+        #   1. No estimate_output.json AND no recursive file activity for 25 min  → hung Claude session
+        #   2. estimate_output.json exists AND has not been modified for 15 min   → hung save-to-db
+        # Guard: only evaluate after the session has been running ≥25 min, so merge terminals
+        # that start from an empty cwd are not falsely killed before they produce output.
         try:
-            project_files = [
-                f for f in os.listdir(cwd)
-                if not f.startswith('.') and not f.startswith('_')
-            ]
-            if project_files:
-                newest_mtime = max(os.path.getmtime(os.path.join(cwd, f)) for f in project_files)
-                idle_seconds = time.time() - newest_mtime
-                if idle_seconds > 600:
-                    elapsed = int(time.time() - start)
-                    print(f"[claude] WARNING: No file activity for {int(idle_seconds)}s at {elapsed}s — session may be stalled")
+            elapsed = time.time() - start
+            estimate_file = os.path.join(cwd, "estimate_output.json")
+
+            # Recursively find the most recently modified file under cwd,
+            # excluding worker control files (_prompt.txt, _run.sh, _window_id.txt).
+            newest_mtime = None
+            for root, dirs, files in os.walk(cwd):
+                for f in files:
+                    if f.startswith("_"):
+                        continue
+                    try:
+                        mtime = os.path.getmtime(os.path.join(root, f))
+                        if newest_mtime is None or mtime > newest_mtime:
+                            newest_mtime = mtime
+                    except OSError:
+                        continue
+
+            idle_seconds = (time.time() - newest_mtime) if newest_mtime else elapsed
+
+            if os.path.exists(estimate_file):
+                est_idle = time.time() - os.path.getmtime(estimate_file)
+                if est_idle > 900:  # 15 min
+                    print(f"[claude] STALLED: estimate_output.json idle {int(est_idle)}s — save-to-db hung, terminating")
+                    _exit_claude_and_close_terminal(window_id)
+                    return RESULT_TIMEOUT
+                else:
+                    print(f"[claude] estimate_output.json exists at {int(elapsed)}s — waiting for save-to-db")
+            else:
+                if idle_seconds > 1500 and elapsed > 1500:  # 25 min, both
+                    print(f"[claude] STALLED: no file activity for {int(idle_seconds)}s at {int(elapsed)}s — terminating session")
+                    _exit_claude_and_close_terminal(window_id)
+                    return RESULT_TIMEOUT
+                elif idle_seconds > 600:
+                    print(f"[claude] WARNING: No file activity for {int(idle_seconds)}s at {int(elapsed)}s — session may be stalled")
         except (ValueError, OSError):
             pass
 
