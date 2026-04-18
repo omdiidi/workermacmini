@@ -129,17 +129,38 @@ def _write_estimation_to_db_inner(project_id, output):
         # 7. anomaly_flags — map to exact DB columns
         db.delete("anomaly_flags", project_id=project_id, trade=trade)
         trade_anomalies = [a for a in _safe_list(output.get("anomalies", [])) if a.get("trade") == trade]
-        if trade_anomalies:
-            mapped_anomalies = [{
-                "project_id": project_id,
-                "trade": a.get("trade", trade),
-                "anomaly_type": a.get("anomaly_type", "noted"),
-                "category": a.get("category", ""),
-                "description": a.get("description", ""),
-                "affected_items": [str(i) for i in (a.get("affected_items") if isinstance(a.get("affected_items"), list) else [])],
-                "cost_impact": float(a.get("cost_impact", 0) or 0),
-            } for a in trade_anomalies]
-            db.post("anomaly_flags", mapped_anomalies)
+        mapped_anomalies = [{
+            "project_id": project_id,
+            "trade": a.get("trade", trade),
+            "anomaly_type": a.get("anomaly_type", "noted"),
+            "category": a.get("category", ""),
+            "description": a.get("description", ""),
+            "affected_items": [str(i) for i in (a.get("affected_items") if isinstance(a.get("affected_items"), list) else [])],
+            "cost_impact": float(a.get("cost_impact", 0) or 0),
+        } for a in trade_anomalies]
+
+        # Soft validation: flag items with empty source_refs as possibly fabricated.
+        # Do NOT reject — just observe so fabricated items get surfaced in the UI.
+        for li in items:
+            refs = li.get("source_refs")
+            if not refs or (isinstance(refs, list) and len(refs) == 0):
+                item_id = li.get("item_id") or "(no item_id)"
+                print(f"[validate] Item {item_id} (trade={trade}) has no source_refs — may be fabricated", file=sys.stderr)
+                mapped_anomalies.append({
+                    "project_id": project_id,
+                    "trade": trade,
+                    "anomaly_type": "noted",
+                    "category": "missing_source_refs",
+                    "description": f"Item {item_id} has no source_refs — may be fabricated",
+                    "affected_items": [str(item_id)],
+                    "cost_impact": 0.0,
+                })
+
+        if mapped_anomalies:
+            try:
+                db.post("anomaly_flags", mapped_anomalies)
+            except Exception as e:
+                print(f"[validate] anomaly_flags insert failed (soft): {e}", file=sys.stderr)
 
     # 8. site_intelligence — wrap in expected JSONB columns
     site_intel = output.get("site_intelligence")
